@@ -1,0 +1,31 @@
+[package]
+name = "openshores-launcher"
+version = "1.0.0"
+description = "A fast, portable Windows launcher for OpenShores"
+authors = ["OpenShores Community"]
+license = "MIT"
+edition = "2021"
+build = "build.rs"
+
+[build-dependencies]
+tauri-build = "2.6.3"
+
+[dependencies]
+open = "5.3.2"
+reqwest = { version = "0.13.4", features = ["blocking", "json"] }
+rfd = "0.17.2"
+semver = "1.0.28"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tauri = "2.11.5"
+tauri-plugin-single-instance = "2"
+time = { version = "0.3", features = ["formatting"] }
+zip = { version = "8.1.0", default-features = false, features = ["deflate"] }
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+opt-level = "s"
+panic = "abort"
+strip = true

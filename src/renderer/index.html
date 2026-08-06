@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' asset: data:; style-src 'self'; script-src 'self'; connect-src ipc: http://ipc.localhost">
+  <title>OpenShores Launcher</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="window-frame">
+    <header class="titlebar" data-figma-node="1:3" data-tauri-drag-region>
+      <div class="titlebar-brand" data-tauri-drag-region>
+        <img src="assets/header-icon.png" alt="OpenShores" data-tauri-drag-region>
+        <span data-tauri-drag-region>OpenShores Launcher</span>
+      </div>
+      <div class="window-controls">
+        <button id="minimize" class="minimize" aria-label="Minimize" title="Minimize"></button>
+        <button id="close" class="close" aria-label="Close" title="Close"></button>
+      </div>
+    </header>
+
+    <main>
+      <div class="space-banner" data-figma-node="1:66">
+        <img src="assets/space-banner.png" alt="Planets in the OpenShores universe">
+      </div>
+
+      <div class="workspace">
+        <nav id="section-nav" class="section-nav hidden" aria-label="Launcher sections">
+          <button class="nav-item active" data-view="home">Overview</button>
+          <button class="nav-item" data-view="settings">Settings</button>
+          <span class="nav-spacer"></span>
+          <span class="service-state"><i></i>ONLINE</span>
+          <span class="version">v1.0.0</span>
+        </nav>
+
+        <section id="home-view" class="view active">
+          <div class="overview-grid">
+            <div class="status-panel">
+              <div class="panel-heading">
+                <span>OPENSHORES CLIENT</span>
+                <div id="patch-badge" class="badge hidden">IP PATCHED</div>
+              </div>
+              <div class="status-title">
+                <span id="status-dot" class="large-dot"></span>
+                <span id="status-text">Checking installation…</span>
+              </div>
+              <p class="status-copy">The classic client, configured for the OpenShores community server.</p>
+
+              <div id="progress-area" class="progress-area hidden">
+                <div class="progress-copy"><strong id="progress-phase">Preparing</strong><span id="progress-percent">0%</span></div>
+                <div class="progress-track"><div id="progress-bar" class="progress-bar"></div></div>
+                <p id="progress-detail">Starting…</p>
+              </div>
+              <div id="error-box" class="error-box hidden"></div>
+
+              <div id="startup-placeholder" class="startup-placeholder" role="status" aria-live="polite">
+                <span class="startup-spinner" aria-hidden="true"></span>
+                <div><strong>Starting launcher</strong><p>Checking your OpenShores installation…</p></div>
+              </div>
+              <div id="actions" class="actions hidden">
+                <button id="primary-action" class="primary" disabled>Loading…</button>
+                <button id="open-folder" class="secondary hidden">Open folder</button>
+              </div>
+            </div>
+
+            <aside class="quick-info">
+              <div><span>GAME SOURCE</span><strong>openshores.net</strong></div>
+              <div><span>PATCH CHANNEL</span><strong>Latest release</strong></div>
+              <div><span>INSTALL MODE</span><strong>Managed & verified</strong></div>
+            </aside>
+          </div>
+          <div id="update-banner" class="update-banner hidden"><span id="update-message"></span><button id="install-update" class="text-button hidden">Restart & install</button></div>
+        </section>
+
+        <section id="settings-view" class="view settings-view">
+          <div class="settings-header"><div><span class="kicker">LAUNCHER SETTINGS</span><h1>Installation & updates</h1></div></div>
+          <div class="settings-list">
+            <div class="path-setting">
+              <label>Game installation folder</label>
+              <div class="path-row"><div id="install-path" class="path-value">—</div><button id="choose-folder" class="secondary">Browse…</button></div>
+            </div>
+            <div class="setting-row"><div><strong>Refresh game files</strong><p>Download the current archive and reapply the IP patch.</p></div><button id="refresh-game" class="secondary">Update game</button></div>
+            <div class="setting-row"><div><strong>Launcher updates</strong><p>Check the GitHub releases feed for a newer launcher.</p></div><button id="check-updates" class="secondary">Check now</button></div>
+            <div class="setting-row danger-row"><div><strong>Uninstall game</strong><p>Remove only launcher-managed files from the selected folder.</p></div><button id="uninstall" class="danger">Uninstall</button></div>
+          </div>
+          <div class="links"><button data-url="https://openshores.net/">OpenShores website ↗</button><button data-url="https://github.com/Celarious/OpenShores-IP-Patch">IP patch source ↗</button></div>
+        </section>
+      </div>
+    </main>
+  </div>
+  <script src="renderer.js"></script>
+</body>
+</html>
