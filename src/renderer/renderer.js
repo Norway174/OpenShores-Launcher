@@ -34,6 +34,7 @@ function clearError() { $('#error-box').classList.add('hidden'); }
 function render(nextState = state) {
   if (!nextState) return;
   state = nextState;
+  $('.version').textContent = `v${state.launcherVersion}`;
   $('#section-nav').classList.remove('hidden');
   $('#startup-placeholder').classList.add('hidden');
   $('#actions').classList.remove('hidden');
@@ -97,7 +98,7 @@ window.launcher.onGameStatus(data => {
 window.launcher.onUpdaterStatus(data => {
   $('#update-banner').classList.remove('hidden');
   $('#update-message').textContent = data.message;
-  $('#install-update').classList.toggle('hidden', data.state !== 'ready');
+  $('#install-update').classList.toggle('hidden', data.state !== 'available');
 });
 
 document.querySelectorAll('.nav-item').forEach(button => button.addEventListener('click', () => {

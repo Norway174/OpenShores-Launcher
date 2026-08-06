@@ -76,8 +76,8 @@ struct AppState {
 
 #[derive(Clone)]
 struct PendingUpdate {
-    destination: PathBuf,
-    version: String,
+    asset: GithubAsset,
+    version: Version,
 }
 
 struct OperationGuard(Arc<AtomicBool>);
@@ -97,6 +97,7 @@ struct LauncherConfig {
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LauncherSnapshot {
+    launcher_version: String,
     installed: bool,
     install_path: String,
     manifest: Option<Value>,
@@ -259,6 +260,7 @@ fn get_snapshot(state: &AppState) -> LauncherResult<LauncherSnapshot> {
     let installed = manifest.is_some() && install_path.join(GAME_EXE).is_file();
     let game_running = state.game_pid.lock().map_err(error_string)?.is_some();
     Ok(LauncherSnapshot {
+        launcher_version: env!("CARGO_PKG_VERSION").to_string(),
         installed,
         install_path: install_path.to_string_lossy().into_owned(),
         manifest,
@@ -386,6 +388,13 @@ fn verify_asset_digest(path: &Path, asset: &GithubAsset) -> LauncherResult<()> {
         }
     }
     Ok(())
+}
+
+fn verify_launcher_digest(path: &Path, asset: &GithubAsset) -> LauncherResult<()> {
+    if asset.digest.is_none() {
+        return Err("GitHub did not provide a checksum for the launcher update.".to_string());
+    }
+    verify_asset_digest(path, asset)
 }
 
 fn extract_zip(zip_path: &Path, destination: &Path) -> LauncherResult<()> {
@@ -772,11 +781,10 @@ fn parse_release_version(release: &GithubRelease) -> LauncherResult<Version> {
 
 fn download_launcher_update(
     app: &AppHandle,
-    state: &AppState,
     client: &Client,
     asset: &GithubAsset,
     version: &Version,
-) -> LauncherResult<()> {
+) -> LauncherResult<PathBuf> {
     let temp = launcher_temp_path()?;
     fs::create_dir_all(&temp).map_err(error_string)?;
     let destination = temp.join(format!("OpenShores-Launcher-{version}.download.exe"));
@@ -785,47 +793,44 @@ fn download_launcher_update(
         "downloading",
         format!("Downloading launcher {version} - 0%"),
     );
-    let mut response = checked_response(
-        client
-            .get(&asset.browser_download_url)
-            .send()
-            .map_err(error_string)?,
-        "Launcher download",
-    )?;
-    let total = response.content_length().unwrap_or(asset.size);
-    let mut output = File::create(&destination).map_err(error_string)?;
-    let mut buffer = vec![0_u8; 128 * 1024];
-    let mut received = 0_u64;
-    loop {
-        let count = response.read(&mut buffer).map_err(error_string)?;
-        if count == 0 {
-            break;
+    let result = (|| {
+        let mut response = checked_response(
+            client
+                .get(&asset.browser_download_url)
+                .send()
+                .map_err(error_string)?,
+            "Launcher download",
+        )?;
+        let total = response.content_length().unwrap_or(asset.size);
+        let mut output = File::create(&destination).map_err(error_string)?;
+        let mut buffer = vec![0_u8; 128 * 1024];
+        let mut received = 0_u64;
+        loop {
+            let count = response.read(&mut buffer).map_err(error_string)?;
+            if count == 0 {
+                break;
+            }
+            output.write_all(&buffer[..count]).map_err(error_string)?;
+            received += count as u64;
+            let percent = if total > 0 {
+                (received.saturating_mul(100) / total).min(100)
+            } else {
+                0
+            };
+            emit_updater(
+                app,
+                "downloading",
+                format!("Downloading launcher {version} - {percent}%"),
+            );
         }
-        output.write_all(&buffer[..count]).map_err(error_string)?;
-        received += count as u64;
-        let percent = if total > 0 {
-            (received.saturating_mul(100) / total).min(100)
-        } else {
-            0
-        };
-        emit_updater(
-            app,
-            "downloading",
-            format!("Downloading launcher {version} - {percent}%"),
-        );
+        output.flush().map_err(error_string)?;
+        verify_launcher_digest(&destination, asset)?;
+        Ok(destination.clone())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&destination);
     }
-    output.flush().map_err(error_string)?;
-    verify_asset_digest(&destination, asset)?;
-    *state.pending_update.lock().map_err(error_string)? = Some(PendingUpdate {
-        destination,
-        version: version.to_string(),
-    });
-    emit_updater(
-        app,
-        "ready",
-        format!("Launcher {version} is ready to install."),
-    );
-    Ok(())
+    result
 }
 
 fn check_updates_sync(app: &AppHandle, state: &AppState, manual: bool) -> LauncherResult<()> {
@@ -849,6 +854,7 @@ fn check_updates_sync(app: &AppHandle, state: &AppState, manual: bool) -> Launch
     let release_version = parse_release_version(&release)?;
     let current_version = Version::parse(env!("CARGO_PKG_VERSION")).map_err(error_string)?;
     if release_version <= current_version {
+        *state.pending_update.lock().map_err(error_string)? = None;
         if manual {
             emit_updater(app, "current", "Launcher is up to date.");
         }
@@ -857,16 +863,20 @@ fn check_updates_sync(app: &AppHandle, state: &AppState, manual: bool) -> Launch
     let asset = release
         .assets
         .iter()
-        .find(|asset| {
-            let name = asset.name.to_ascii_lowercase();
-            name.starts_with("openshores-launcher")
-                && name.ends_with(".exe")
-                && !name.contains("setup")
-        })
+        .find(|asset| asset.name.eq_ignore_ascii_case("OpenShores-Launcher.exe"))
         .ok_or_else(|| {
             format!("Launcher {release_version} does not include a portable Windows executable.")
         })?;
-    download_launcher_update(app, state, &client, asset, &release_version)
+    *state.pending_update.lock().map_err(error_string)? = Some(PendingUpdate {
+        asset: asset.clone(),
+        version: release_version.clone(),
+    });
+    emit_updater(
+        app,
+        "available",
+        format!("Launcher {release_version} is available."),
+    );
+    Ok(())
 }
 
 fn report_previous_update_error(app: &AppHandle) {
@@ -1053,17 +1063,20 @@ async fn check_updates(app: AppHandle, state: State<'_, AppState>) -> LauncherRe
     result
 }
 
-#[tauri::command]
-fn install_launcher_update(app: AppHandle, state: State<'_, AppState>) -> LauncherResult<bool> {
+fn install_launcher_update_sync(app: &AppHandle, state: &AppState) -> LauncherResult<bool> {
     let pending = state
         .pending_update
         .lock()
         .map_err(error_string)?
         .clone()
-        .ok_or_else(|| "No launcher update has been downloaded.".to_string())?;
-    if !pending.destination.is_file() {
-        return Err("The downloaded launcher update is missing.".to_string());
-    }
+        .ok_or_else(|| "No launcher update is available.".to_string())?;
+    let client = http_client()?;
+    let destination = download_launcher_update(app, &client, &pending.asset, &pending.version)?;
+    emit_updater(
+        app,
+        "installing",
+        format!("Installing launcher {}...", pending.version),
+    );
     let target = env::current_exe().map_err(error_string)?;
     let temp = launcher_temp_path()?;
     fs::create_dir_all(&temp).map_err(error_string)?;
@@ -1073,10 +1086,7 @@ fn install_launcher_update(app: AppHandle, state: State<'_, AppState>) -> Launch
         "@echo off".to_string(),
         "setlocal".to_string(),
         format!("set \"LAUNCHER_PID={}\"", std::process::id()),
-        format!(
-            "set \"UPDATE_SOURCE={}\"",
-            batch_escape(&pending.destination)
-        ),
+        format!("set \"UPDATE_SOURCE={}\"", batch_escape(&destination)),
         format!("set \"UPDATE_TARGET={}\"", batch_escape(&target)),
         format!("set \"ERROR_LOG={}\"", batch_escape(&error_log)),
         format!("rem Updating to {}", pending.version),
@@ -1115,11 +1125,30 @@ fn install_launcher_update(app: AppHandle, state: State<'_, AppState>) -> Launch
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
     command.spawn().map_err(error_string)?;
+    let app = app.clone();
     thread::spawn(move || {
         thread::sleep(Duration::from_millis(250));
         app.exit(0);
     });
     Ok(true)
+}
+
+#[tauri::command]
+async fn install_launcher_update(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> LauncherResult<bool> {
+    let backend = state.inner().clone();
+    let app_for_work = app.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        install_launcher_update_sync(&app_for_work, &backend)
+    })
+    .await
+    .map_err(error_string)?;
+    if let Err(error) = &result {
+        emit_updater(&app, "error", format!("Launcher update failed: {error}"));
+    }
+    result
 }
 
 #[tauri::command]
@@ -1183,7 +1212,7 @@ fn main() {
                     .center()
                     .decorations(false)
                     .transparent(false)
-                .shadow(false)
+                    .shadow(false)
                     .data_directory(webview_data)
                     .build()?;
             #[cfg(windows)]
@@ -1226,6 +1255,18 @@ mod tests {
             batch_escape(Path::new(r"C:\Temp\100%\Launcher.exe")),
             r"C:\Temp\100%%\Launcher.exe"
         );
+    }
+
+    #[test]
+    fn launcher_updates_require_a_github_checksum() {
+        let asset = GithubAsset {
+            name: "OpenShores-Launcher.exe".to_string(),
+            browser_download_url: "https://example.invalid/launcher.exe".to_string(),
+            digest: None,
+            size: 0,
+        };
+        let error = verify_launcher_digest(Path::new("unused"), &asset).unwrap_err();
+        assert!(error.contains("checksum"));
     }
 
     #[test]

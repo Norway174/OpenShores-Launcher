@@ -9,6 +9,8 @@ $artifact = Join-Path $distPath 'OpenShores-Launcher.exe'
 
 if (-not (Test-Path -LiteralPath $cargo)) { throw 'Rust is not installed. Install the stable MSVC Rust toolchain first.' }
 
+& (Join-Path $PSScriptRoot 'sync-version.ps1') | Out-Null
+
 & $cargo build --release --manifest-path $manifest
 if ($LASTEXITCODE -ne 0) { throw "Tauri build failed with exit code $LASTEXITCODE." }
 if (-not (Test-Path -LiteralPath $builtExecutable)) { throw "Tauri did not create $builtExecutable." }

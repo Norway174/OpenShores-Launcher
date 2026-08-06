@@ -87,6 +87,10 @@ npm run dist
 dist\OpenShores-Launcher.exe
 ```
 
+`package.json` is the source of truth for the launcher version. The build and test scripts synchronize that version into the Rust and Tauri metadata. A push to `main` only creates a GitHub release when the `package.json` version changed; ordinary commits run without publishing a release.
+
+To publish a new launcher, update the version in `package.json`, commit it with the release changes, and push to `main`. GitHub Actions builds the Windows executable, creates a matching `v<version>` release, and uploads both the portable executable and its SHA-256 checksum.
+
 The release executable uses the static MSVC C runtime and embeds the frontend, application icon, and xdelta3 utility. Windows supplies WebView2, which keeps the portable binary substantially smaller than an Electron bundle.
 
 ### Project layout
