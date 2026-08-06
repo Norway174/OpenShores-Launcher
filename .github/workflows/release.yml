@@ -25,29 +25,15 @@ jobs:
       - name: Check package version
         id: version
         shell: pwsh
-        env:
-          BEFORE_SHA: ${{ github.event.before }}
         run: |
           $current = (Get-Content package.json -Raw | ConvertFrom-Json).version
           if ($current -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$') {
             throw "package.json has an invalid semantic version: $current"
           }
 
-          $previous = $null
-          if ($env:BEFORE_SHA -and $env:BEFORE_SHA -notmatch '^0+$') {
-            $previousJson = git show "$($env:BEFORE_SHA):package.json" 2>$null
-            if ($LASTEXITCODE -eq 0) {
-              $previous = ($previousJson | ConvertFrom-Json).version
-            }
-          }
-
-          $changed = $null -eq $previous -or $current -ne $previous
+          $changed = -not [bool](git tag --list "v$current")
           "changed=$($changed.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
           "version=$current" >> $env:GITHUB_OUTPUT
-
-          if ($changed -and (git tag --list "v$current")) {
-            throw "Release tag v$current already exists. Increase package.json version."
-          }
 
   build-and-release:
     needs: detect-version-change
