@@ -1,6 +1,6 @@
 [package]
 name = "openshores-launcher"
-version = "1.0.1"
+version = "1.0.2"
 description = "A fast, portable Windows launcher for OpenShores"
 authors = ["OpenShores Community"]
 license = "MIT"
