@@ -22,6 +22,8 @@ window.launcher = {
 };
 let state = null;
 let busy = false;
+let updateModalLocked = false;
+let updateModalPreviousFocus = null;
 
 function showError(error) {
   const box = $('#error-box');
@@ -30,6 +32,33 @@ function showError(error) {
 }
 
 function clearError() { $('#error-box').classList.add('hidden'); }
+
+function setUpdateCheckResult(message, status = '') {
+  const result = $('#update-check-result');
+  result.textContent = message;
+  result.className = `update-check-result${status ? ` ${status}` : ''}`;
+  result.classList.toggle('hidden', !message);
+}
+
+function openUpdateModal() {
+  const modal = $('#update-modal');
+  const wasHidden = modal.classList.contains('hidden');
+  if (wasHidden) updateModalPreviousFocus = document.activeElement;
+  modal.classList.remove('hidden');
+  if (wasHidden) window.setTimeout(() => $('#install-update').focus(), 0);
+}
+
+function closeUpdateModal() {
+  if (updateModalLocked) return;
+  $('#update-modal').classList.add('hidden');
+  if (updateModalPreviousFocus?.focus) updateModalPreviousFocus.focus();
+}
+
+function setUpdateModalLocked(locked) {
+  updateModalLocked = locked;
+  $('#dismiss-update').disabled = locked;
+  $('#update-later').classList.toggle('hidden', locked);
+}
 
 function render(nextState = state) {
   if (!nextState) return;
@@ -95,11 +124,38 @@ window.launcher.onGameStatus(data => {
   render();
 });
 
-window.launcher.onUpdaterStatus(data => {
-  $('#update-banner').classList.remove('hidden');
-  $('#update-message').textContent = data.message;
-  $('#install-update').classList.toggle('hidden', data.state !== 'available');
-});
+function handleUpdaterStatus(data) {
+  const installButton = $('#install-update');
+  if (data.state === 'available') {
+    setUpdateModalLocked(false);
+    $('#update-dialog-title').textContent = 'A new version is available';
+    $('#update-message').textContent = data.message;
+    installButton.textContent = 'Download & restart';
+    installButton.disabled = false;
+    setUpdateCheckResult(data.message);
+    openUpdateModal();
+  } else if (data.state === 'downloading' || data.state === 'installing') {
+    setUpdateModalLocked(true);
+    $('#update-dialog-title').textContent = data.state === 'downloading' ? 'Downloading update' : 'Installing update';
+    $('#update-message').textContent = data.message;
+    installButton.textContent = data.state === 'downloading' ? 'Downloading...' : 'Restarting...';
+    installButton.disabled = true;
+    openUpdateModal();
+  } else if (data.state === 'current') {
+    setUpdateCheckResult(data.message, 'success');
+  } else if (data.state === 'error') {
+    setUpdateModalLocked(false);
+    setUpdateCheckResult(data.message, 'error');
+    if (!$('#update-modal').classList.contains('hidden')) {
+      $('#update-dialog-title').textContent = 'Update could not finish';
+      $('#update-message').textContent = data.message;
+      installButton.textContent = 'Try again';
+      installButton.disabled = false;
+    }
+  }
+}
+
+window.launcher.onUpdaterStatus(handleUpdaterStatus);
 
 document.querySelectorAll('.nav-item').forEach(button => button.addEventListener('click', () => {
   document.querySelectorAll('.nav-item').forEach(item => item.classList.toggle('active', item === button));
@@ -112,8 +168,40 @@ $('#open-folder').addEventListener('click', () => window.launcher.openFolder().c
 $('#choose-folder').addEventListener('click', async () => { clearError(); try { const next = await window.launcher.chooseFolder(); if (next) render(next); } catch (error) { showError(error); } });
 $('#uninstall').addEventListener('click', () => runOperation(window.launcher.uninstall));
 $('#refresh-game').addEventListener('click', () => runOperation(window.launcher.install));
-$('#check-updates').addEventListener('click', () => window.launcher.checkUpdates().catch(showError));
-$('#install-update').addEventListener('click', () => window.launcher.installUpdate().catch(showError));
+$('#check-updates').addEventListener('click', async event => {
+  const button = event.currentTarget;
+  if (button.disabled) return;
+  button.disabled = true;
+  button.textContent = 'Checking...';
+  setUpdateCheckResult('Checking for launcher updates...', 'checking');
+  try {
+    handleUpdaterStatus(await window.launcher.checkUpdates());
+  } catch (error) {
+    setUpdateCheckResult(error?.message || String(error), 'error');
+  } finally {
+    button.disabled = false;
+    button.textContent = 'Check now';
+  }
+});
+$('#install-update').addEventListener('click', async () => {
+  if ($('#install-update').disabled) return;
+  setUpdateModalLocked(true);
+  $('#install-update').disabled = true;
+  $('#install-update').textContent = 'Starting...';
+  try {
+    await window.launcher.installUpdate();
+  } catch (error) {
+    setUpdateModalLocked(false);
+    $('#update-dialog-title').textContent = 'Update could not finish';
+    $('#update-message').textContent = error?.message || String(error);
+    $('#install-update').disabled = false;
+    $('#install-update').textContent = 'Try again';
+  }
+});
+$('#update-later').addEventListener('click', closeUpdateModal);
+$('#dismiss-update').addEventListener('click', closeUpdateModal);
+$('#update-modal').addEventListener('click', event => { if (event.target === event.currentTarget) closeUpdateModal(); });
+document.addEventListener('keydown', event => { if (event.key === 'Escape') closeUpdateModal(); });
 $('#minimize').addEventListener('click', () => window.launcher.minimize());
 $('#close').addEventListener('click', () => window.launcher.close());
 document.querySelectorAll('[data-url]').forEach(button => button.addEventListener('click', () => window.launcher.openLink(button.dataset.url).catch(showError)));

@@ -70,7 +70,6 @@
               <div><span>INSTALL MODE</span><strong>Managed & verified</strong></div>
             </aside>
           </div>
-          <div id="update-banner" class="update-banner hidden"><span id="update-message"></span><button id="install-update" class="text-button hidden">Restart & install</button></div>
         </section>
 
         <section id="settings-view" class="view settings-view">
@@ -81,13 +80,29 @@
               <div class="path-row"><div id="install-path" class="path-value">—</div><button id="choose-folder" class="secondary">Browse…</button></div>
             </div>
             <div class="setting-row"><div><strong>Refresh game files</strong><p>Download the current archive and reapply the IP patch.</p></div><button id="refresh-game" class="secondary">Update game</button></div>
-            <div class="setting-row"><div><strong>Launcher updates</strong><p>Check the GitHub releases feed for a newer launcher.</p></div><button id="check-updates" class="secondary">Check now</button></div>
+            <div class="setting-row"><div><strong>Launcher updates</strong><p>Check the GitHub releases feed for a newer launcher.</p><p id="update-check-result" class="update-check-result hidden" role="status" aria-live="polite"></p></div><button id="check-updates" class="secondary">Check now</button></div>
             <div class="setting-row danger-row"><div><strong>Uninstall game</strong><p>Remove only launcher-managed files from the selected folder.</p></div><button id="uninstall" class="danger">Uninstall</button></div>
           </div>
           <div class="links"><button data-url="https://openshores.net/">OpenShores website ↗</button><button data-url="https://github.com/Celarious/OpenShores-IP-Patch">IP patch source ↗</button></div>
         </section>
       </div>
     </main>
+  </div>
+
+  <div id="update-modal" class="modal-backdrop hidden">
+    <section class="update-dialog" role="dialog" aria-modal="true" aria-labelledby="update-dialog-title" aria-describedby="update-message">
+      <button id="dismiss-update" class="dialog-close" aria-label="Close update notification" title="Close">&times;</button>
+      <div class="update-icon" aria-hidden="true"><span>&darr;</span></div>
+      <div class="update-dialog-copy">
+        <span class="kicker">LAUNCHER UPDATE</span>
+        <h2 id="update-dialog-title">A new version is available</h2>
+        <p id="update-message">A newer OpenShores Launcher is ready to download.</p>
+      </div>
+      <div class="update-dialog-actions">
+        <button id="update-later" class="secondary">Later</button>
+        <button id="install-update" class="primary">Download &amp; restart</button>
+      </div>
+    </section>
   </div>
   <script src="renderer.js"></script>
 </body>

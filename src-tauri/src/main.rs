@@ -833,21 +833,21 @@ fn download_launcher_update(
     result
 }
 
-fn check_updates_sync(app: &AppHandle, state: &AppState, manual: bool) -> LauncherResult<()> {
+fn check_updates_sync(
+    app: &AppHandle,
+    state: &AppState,
+    manual: bool,
+) -> LauncherResult<UpdaterStatusPayload> {
     let client = http_client()?;
     let response = client
         .get(LAUNCHER_RELEASE_API)
         .send()
         .map_err(error_string)?;
     if response.status().as_u16() == 404 {
-        if manual {
-            emit_updater(
-                app,
-                "current",
-                "The launcher update channel has not been published yet.",
-            );
-        }
-        return Ok(());
+        return Ok(UpdaterStatusPayload {
+            state: "current".to_string(),
+            message: "The launcher update channel has not been published yet.".to_string(),
+        });
     }
     let response = checked_response(response, "Launcher update check")?;
     let release: GithubRelease = response.json().map_err(error_string)?;
@@ -855,10 +855,10 @@ fn check_updates_sync(app: &AppHandle, state: &AppState, manual: bool) -> Launch
     let current_version = Version::parse(env!("CARGO_PKG_VERSION")).map_err(error_string)?;
     if release_version <= current_version {
         *state.pending_update.lock().map_err(error_string)? = None;
-        if manual {
-            emit_updater(app, "current", "Launcher is up to date.");
-        }
-        return Ok(());
+        return Ok(UpdaterStatusPayload {
+            state: "current".to_string(),
+            message: "Launcher is up to date.".to_string(),
+        });
     }
     let asset = release
         .assets
@@ -871,12 +871,14 @@ fn check_updates_sync(app: &AppHandle, state: &AppState, manual: bool) -> Launch
         asset: asset.clone(),
         version: release_version.clone(),
     });
-    emit_updater(
-        app,
-        "available",
-        format!("Launcher {release_version} is available."),
-    );
-    Ok(())
+    let status = UpdaterStatusPayload {
+        state: "available".to_string(),
+        message: format!("Launcher {release_version} is available."),
+    };
+    if !manual {
+        let _ = app.emit("updater-status", status.clone());
+    }
+    Ok(status)
 }
 
 fn report_previous_update_error(app: &AppHandle) {
@@ -1046,21 +1048,14 @@ fn open_link(url: String) -> LauncherResult<()> {
 }
 
 #[tauri::command]
-async fn check_updates(app: AppHandle, state: State<'_, AppState>) -> LauncherResult<()> {
+async fn check_updates(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> LauncherResult<UpdaterStatusPayload> {
     let backend = state.inner().clone();
-    let app_for_error = app.clone();
-    let result =
-        tauri::async_runtime::spawn_blocking(move || check_updates_sync(&app, &backend, true))
-            .await
-            .map_err(error_string)?;
-    if let Err(error) = &result {
-        emit_updater(
-            &app_for_error,
-            "error",
-            format!("Update check unavailable: {error}"),
-        );
-    }
-    result
+    tauri::async_runtime::spawn_blocking(move || check_updates_sync(&app, &backend, true))
+        .await
+        .map_err(error_string)?
 }
 
 fn install_launcher_update_sync(app: &AppHandle, state: &AppState) -> LauncherResult<bool> {
