@@ -1,6 +1,7 @@
 name: Release launcher
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
 
