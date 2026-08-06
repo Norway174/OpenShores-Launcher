@@ -47,7 +47,7 @@ The portable executable remains wherever you placed it. Launcher-specific data i
 Selecting **Uninstall OpenShores** removes the managed game installation, not the launcher itself. To remove the launcher completely, close it, delete its portable `.exe`, and optionally delete `%LOCALAPPDATA%\OpenShores-Launcher` if you also want to remove its settings and cached data.
 
 ## Screenshots
-![Application Preview](assets\appPreview.png)
+![Application Preview](assets/appPreview.png)
 
 ## Contributing
 
