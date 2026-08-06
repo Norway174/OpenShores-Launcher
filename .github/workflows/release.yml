@@ -1,12 +1,8 @@
 name: Release launcher
 
 on:
-  workflow_dispatch:
   push:
     branches: ['main']
-  schedule:
-    # Backstop for GitHub push events that are suppressed or not enqueued.
-    - cron: '*/5 * * * *'
 
 permissions:
   contents: write
@@ -26,7 +22,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Check package version
+      - name: Check package version against release tags
         id: version
         shell: pwsh
         run: |
