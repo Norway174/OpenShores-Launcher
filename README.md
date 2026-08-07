@@ -6,11 +6,14 @@ A fast, portable Windows launcher for [OpenShores](https://openshores.net/), bui
 
 ## Features
 
-- Downloads and installs the official OpenShores client.
-- Fetches and applies the latest compatible IP patch with xdelta3.
+- Downloads the official OpenShores client from its per-file manifest and verifies every clean source file with SHA-256.
+- Reuses unchanged clean files during game refreshes and downloads only missing or changed files.
+- Fetches release ZIPs for the IP patch, preserves their folder structure, and applies every compatible xdelta with xdelta3.
+- Lets users follow the latest IP patch release or pin a specific published release.
+- Checks the selected IP patch in the background at startup and once per hour, without downloading the game again.
 - Launches the game and keeps the installed state after the game exits.
 - Refreshes or removes the launcher-managed game installation.
-- Checks the game, patch, and launcher update channels independently.
+- Checks IP patch and launcher update channels independently.
 - Updates the portable launcher executable in place—no installer required.
 - Stores settings and working data under `%LOCALAPPDATA%\OpenShores-Launcher`.
 - Defaults the game installation to `%LOCALAPPDATA%\OpenShores`.
@@ -28,7 +31,7 @@ A fast, portable Windows launcher for [OpenShores](https://openshores.net/), bui
 1. Download `OpenShores-Launcher.exe` from the repository's **Releases** page.
 2. Move the executable to a permanent, user-writable location, such as a folder under Documents or `%LOCALAPPDATA%`. Avoid `Program Files`, because the portable self-updater must be able to replace the executable. (Optional)
 3. Double-click the executable. No installation required.
-4. Select **Install OpenShores**. The launcher downloads the official client, extracts it, downloads the latest IP patch, and applies it automatically.
+4. Select **Install OpenShores**. The launcher downloads and verifies the clean client files, downloads the selected IP patch, and applies it automatically.
 5. Select **Launch OpenShores** when the status changes to **Ready to play**.
 
 The game installation folder can be changed from **Settings** before installation. Errors displayed by the launcher can be selected and copied when reporting a problem.
@@ -87,9 +90,9 @@ npm run dist
 dist\OpenShores-Launcher.exe
 ```
 
-`package.json` is the source of truth for the launcher version. The build and test scripts synchronize that version into the Rust and Tauri metadata. Every push to `main` checks that version and only creates a GitHub release when it does not already have a matching tag; ordinary commits run without publishing a release.
+`package.json` is the sole source of truth for the launcher version. Tauri reads it directly, and the Rust build embeds the same value in the executable. Cargo's internal package version remains `0.0.0` and is not used as the launcher version. Every push to `main` checks the `package.json` version and only creates a GitHub release when it does not already have a matching tag; ordinary commits run without publishing a release.
 
-To publish a new launcher, update the version in `package.json`, commit it with the release changes, and push to `main`. GitHub Actions builds the Windows executable, creates a matching `v<version>` release, and uploads both the portable executable and its SHA-256 checksum.
+To publish a new launcher, update the version in `package.json`, commit it with the release changes, and push to `main`. GitHub Actions builds the Windows executable, creates a matching `v<version>` release, and uploads the portable executable. The launcher verifies updates with the SHA-256 digest supplied by GitHub Releases.
 
 The release executable uses the static MSVC C runtime and embeds the frontend, application icon, and xdelta3 utility. Windows supplies WebView2, which keeps the portable binary substantially smaller than an Electron bundle.
 
@@ -109,7 +112,7 @@ Do not commit `src-tauri/target`, `src-tauri/gen`, `dist`, or `node_modules`; th
 
 ## Downloads, updates, and licensing
 
-- Game client: [openshores.net/downloads/OpenShores.zip](https://openshores.net/downloads/OpenShores.zip)
+- Game client manifest: [openshores.net/downloads/manifest.json](https://openshores.net/downloads/manifest.json)
 - IP patch releases: [Celarious/OpenShores-IP-Patch](https://github.com/Celarious/OpenShores-IP-Patch)
 - Launcher updates: releases from `Norway174/OpenShores-Launcher`
 

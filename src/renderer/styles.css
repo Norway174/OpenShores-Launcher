@@ -107,6 +107,8 @@ main { height: calc(100% - 40px); overflow: hidden; }
 .settings-header { display: flex; align-items: flex-end; justify-content: space-between; margin-bottom: 12px; }
 .kicker { color: #888; font-size: 8px; letter-spacing: 1.5px; }
 h1 { margin: 4px 0 0; font-family: "Arial Narrow", "Segoe UI", sans-serif; font-size: 23px; font-weight: 400; letter-spacing: 1px; }
+.settings-group { margin-bottom: 13px; }
+.settings-group h2 { margin: 0 0 6px 2px; color: #aaa; font-size: 9px; font-weight: 600; letter-spacing: 1.25px; text-transform: uppercase; }
 .settings-list { padding: 0 16px; }
 .path-setting, .setting-row { padding: 12px 0; border-bottom: 1px solid #3a3a3a; }
 .setting-row:last-child { border-bottom: 0; }
@@ -116,6 +118,10 @@ h1 { margin: 4px 0 0; font-family: "Arial Narrow", "Segoe UI", sans-serif; font-
 .setting-row { display: flex; align-items: center; justify-content: space-between; gap: 18px; }
 .setting-row strong { font-size: 11px; font-weight: 600; }
 .setting-row p { margin: 3px 0 0; color: #858585; font-size: 9px; }
+.setting-control { display: flex; align-items: center; gap: 8px; }
+.setting-control select { width: 190px; height: 34px; padding: 0 28px 0 10px; border: 1px solid #555; border-radius: 2px; color: #ddd; background: #292929; font: inherit; font-size: 10px; }
+.setting-control select:focus { border-color: #5c9ab8; outline: none; }
+.setting-control select:disabled { opacity: .45; }
 .links { display: flex; gap: 18px; margin-top: 9px; }
 .links button { padding: 0; font-size: 9px; }
 .hidden { display: none !important; }

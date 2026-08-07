@@ -7,6 +7,9 @@ window.launcher = {
   getState: () => invoke('get_state'),
   chooseFolder: () => invoke('choose_folder'),
   install: () => invoke('install_game'),
+  getPatchReleases: () => invoke('get_ip_patch_releases'),
+  setPatchRelease: selection => invoke('set_ip_patch_release', { selection }),
+  updatePatch: () => invoke('update_ip_patch'),
   uninstall: () => invoke('uninstall_game'),
   launch: () => invoke('launch_game'),
   openFolder: () => invoke('open_folder'),
@@ -17,7 +20,9 @@ window.launcher = {
   maximize: () => invoke('window_maximize'),
   close: () => invoke('window_close'),
   onProgress: callback => listen('operation-progress', event => callback(event.payload)),
+  onOperationStatus: callback => listen('operation-status', event => callback(event.payload)),
   onGameStatus: callback => listen('game-status', event => callback(event.payload)),
+  onStateChanged: callback => listen('state-changed', event => callback(event.payload)),
   onUpdaterStatus: callback => listen('updater-status', event => callback(event.payload))
 };
 let state = null;
@@ -68,10 +73,14 @@ function render(nextState = state) {
   $('#startup-placeholder').classList.add('hidden');
   $('#actions').classList.remove('hidden');
   $('#install-path').textContent = state.installPath;
+  $('#patch-channel').textContent = state.ipPatchRelease === 'latest' ? 'Latest Release' : state.ipPatchRelease;
+  $('#patch-release').value = state.ipPatchRelease || 'latest';
   $('#patch-badge').classList.toggle('hidden', !state.installed);
   $('#open-folder').classList.toggle('hidden', !state.installed);
   $('#uninstall').disabled = !state.installed || busy;
   $('#refresh-game').disabled = !state.installed || busy || state.gameRunning;
+  $('#update-patch').disabled = !state.installed || busy || state.gameRunning;
+  $('#patch-release').disabled = busy;
   $('#choose-folder').disabled = busy || state.installed;
   const primary = $('#primary-action');
   const dot = $('#status-dot');
@@ -104,6 +113,11 @@ async function runOperation(operation, showProgress = true) {
     render();
   } catch (error) {
     showError(error);
+    try {
+      state = { ...state, ...(await window.launcher.getState()) };
+    } catch (_) {
+      // Keep the last known state when a refresh is unavailable.
+    }
   } finally {
     busy = false;
     render();
@@ -118,11 +132,25 @@ window.launcher.onProgress(data => {
   $('#progress-detail').textContent = data.detail;
 });
 
+window.launcher.onOperationStatus(data => {
+  busy = data.busy;
+  if (data.error) {
+    $('#progress-phase').textContent = 'IP patch update failed';
+    $('#progress-percent').textContent = 'Failed';
+    $('#progress-bar').style.width = '0';
+    $('#progress-detail').textContent = data.error;
+    showError(data.error);
+  }
+  render();
+});
+
 window.launcher.onGameStatus(data => {
   state.gameRunning = data.running;
   if (data.error) showError(data.error);
   render();
 });
+
+window.launcher.onStateChanged(render);
 
 function handleUpdaterStatus(data) {
   const installButton = $('#install-update');
@@ -168,6 +196,12 @@ $('#open-folder').addEventListener('click', () => window.launcher.openFolder().c
 $('#choose-folder').addEventListener('click', async () => { clearError(); try { const next = await window.launcher.chooseFolder(); if (next) render(next); } catch (error) { showError(error); } });
 $('#uninstall').addEventListener('click', () => runOperation(window.launcher.uninstall));
 $('#refresh-game').addEventListener('click', () => runOperation(window.launcher.install));
+$('#update-patch').addEventListener('click', () => runOperation(window.launcher.updatePatch));
+$('#patch-release').addEventListener('change', event => {
+  const selection = event.currentTarget.value;
+  state = { ...state, ipPatchRelease: selection };
+  runOperation(() => window.launcher.setPatchRelease(selection));
+});
 $('#check-updates').addEventListener('click', async event => {
   const button = event.currentTarget;
   if (button.disabled) return;
@@ -206,7 +240,33 @@ $('#minimize').addEventListener('click', () => window.launcher.minimize());
 $('#close').addEventListener('click', () => window.launcher.close());
 document.querySelectorAll('[data-url]').forEach(button => button.addEventListener('click', () => window.launcher.openLink(button.dataset.url).catch(showError)));
 
-window.launcher.getState().then(render).catch(error => {
+async function loadPatchReleases() {
+  const select = $('#patch-release');
+  try {
+    const releases = await window.launcher.getPatchReleases();
+    const selected = state?.ipPatchRelease || 'latest';
+    select.replaceChildren(new Option('Latest Release', 'latest'));
+    for (const release of releases) {
+      const date = release.publishedAt
+        ? new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' }).format(new Date(release.publishedAt))
+        : 'Unknown date';
+      const option = new Option(`${release.name} (${release.tag}) — ${date}`, release.tag);
+      option.disabled = !release.hasZip;
+      if (!release.hasZip) option.textContent += ' — no ZIP asset';
+      select.add(option);
+    }
+    select.value = selected;
+  } catch (error) {
+    showError(`Could not load IP patch releases: ${error?.message || String(error)}`);
+  } finally {
+    select.disabled = busy;
+  }
+}
+
+window.launcher.getState().then(nextState => {
+  render(nextState);
+  loadPatchReleases();
+}).catch(error => {
   $('#startup-placeholder').querySelector('strong').textContent = 'Startup could not finish';
   $('#startup-placeholder').querySelector('p').textContent = 'The error below can be selected and copied.';
   $('.startup-spinner').classList.add('hidden');

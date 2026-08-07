@@ -53,12 +53,6 @@ jobs:
       - name: Build portable launcher
         run: npm run dist
 
-      - name: Create checksum
-        shell: pwsh
-        run: |
-          $hash = (Get-FileHash dist\OpenShores-Launcher.exe -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  OpenShores-Launcher.exe" | Set-Content dist\OpenShores-Launcher.exe.sha256 -Encoding ascii
-
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
@@ -67,6 +61,4 @@ jobs:
           target_commitish: ${{ github.sha }}
           generate_release_notes: true
           fail_on_unmatched_files: true
-          files: |
-            dist/OpenShores-Launcher.exe
-            dist/OpenShores-Launcher.exe.sha256
+          files: dist/OpenShores-Launcher.exe

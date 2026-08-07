@@ -66,7 +66,7 @@
 
             <aside class="quick-info">
               <div><span>GAME SOURCE</span><strong>openshores.net</strong></div>
-              <div><span>PATCH CHANNEL</span><strong>Latest release</strong></div>
+              <div><span>PATCH CHANNEL</span><strong id="patch-channel">Latest Release</strong></div>
               <div><span>INSTALL MODE</span><strong>Managed & verified</strong></div>
             </aside>
           </div>
@@ -74,14 +74,23 @@
 
         <section id="settings-view" class="view settings-view">
           <div class="settings-header"><div><span class="kicker">LAUNCHER SETTINGS</span><h1>Installation & updates</h1></div></div>
-          <div class="settings-list">
-            <div class="path-setting">
-              <label>Game installation folder</label>
-              <div class="path-row"><div id="install-path" class="path-value">—</div><button id="choose-folder" class="secondary">Browse…</button></div>
+          <div class="settings-group">
+            <h2>Game settings</h2>
+            <div class="settings-list">
+              <div class="path-setting">
+                <label>Game installation folder</label>
+                <div class="path-row"><div id="install-path" class="path-value">—</div><button id="choose-folder" class="secondary">Browse…</button></div>
+              </div>
+              <div class="setting-row"><div><strong>IP patch release</strong><p>Use the newest release automatically, or pin a specific release.</p></div><div class="setting-control"><select id="patch-release" aria-label="IP patch release"><option value="latest">Latest Release</option></select><button id="update-patch" class="secondary">Update patch</button></div></div>
+              <div class="setting-row"><div><strong>Refresh game files</strong><p>Verify clean source files, download changes, and reapply the selected IP patch.</p></div><button id="refresh-game" class="secondary">Update game</button></div>
+              <div class="setting-row danger-row"><div><strong>Uninstall game</strong><p>Remove only launcher-managed files from the selected folder.</p></div><button id="uninstall" class="danger">Uninstall</button></div>
             </div>
-            <div class="setting-row"><div><strong>Refresh game files</strong><p>Download the current archive and reapply the IP patch.</p></div><button id="refresh-game" class="secondary">Update game</button></div>
-            <div class="setting-row"><div><strong>Launcher updates</strong><p>Check the GitHub releases feed for a newer launcher.</p><p id="update-check-result" class="update-check-result hidden" role="status" aria-live="polite"></p></div><button id="check-updates" class="secondary">Check now</button></div>
-            <div class="setting-row danger-row"><div><strong>Uninstall game</strong><p>Remove only launcher-managed files from the selected folder.</p></div><button id="uninstall" class="danger">Uninstall</button></div>
+          </div>
+          <div class="settings-group">
+            <h2>Launcher settings</h2>
+            <div class="settings-list">
+              <div class="setting-row"><div><strong>Launcher updates</strong><p>Check the GitHub releases feed for a newer launcher.</p><p id="update-check-result" class="update-check-result hidden" role="status" aria-live="polite"></p></div><button id="check-updates" class="secondary">Check now</button></div>
+            </div>
           </div>
           <div class="links"><button data-url="https://openshores.net/">OpenShores website ↗</button><button data-url="https://github.com/Celarious/OpenShores-IP-Patch">IP patch source ↗</button></div>
         </section>
