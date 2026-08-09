@@ -55,7 +55,14 @@
               </div>
               <div id="actions" class="actions hidden">
                 <button id="primary-action" class="primary" disabled>Loading…</button>
-                <button id="offline-designer" class="secondary" disabled>Open Offline Designer</button>
+                <div id="offline-designer-control" class="designer-dropdown">
+                  <button id="offline-designer" class="secondary" aria-haspopup="menu" aria-expanded="false" disabled><span class="process-button-label">Offline Designers...</span><span class="dropdown-caret" aria-hidden="true">&#9662;</span></button>
+                  <div id="offline-designer-menu" class="designer-menu" role="menu" hidden>
+                    <button type="button" role="menuitem" data-designer-mode="spacecraft">Open Old Spaceship Designer</button>
+                    <button type="button" role="menuitem" data-designer-mode="building">Open Old Building Designer</button>
+                    <button type="button" role="menuitem" data-designer-mode="designer">Open New Style Editor</button>
+                  </div>
+                </div>
               </div>
             </div>
 

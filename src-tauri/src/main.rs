@@ -1600,7 +1600,7 @@ fn uninstall_game_sync(app: &AppHandle, state: &AppState) -> LauncherResult<Laun
 fn launch_game_sync(
     app: &AppHandle,
     state: &AppState,
-    offline_designer: bool,
+    designer_mode: Option<&str>,
 ) -> LauncherResult<LauncherSnapshot> {
     let config = load_config()?;
     let install_path = PathBuf::from(config.install_path.clone().unwrap());
@@ -1608,8 +1608,12 @@ fn launch_game_sync(
     if !executable.is_file() {
         return Err("OpenShores is not installed.".to_string());
     }
-    let process_name = if offline_designer { "designer" } else { "game" };
-    let process_pid = if offline_designer {
+    let process_name = if designer_mode.is_some() {
+        "designer"
+    } else {
+        "game"
+    };
+    let process_pid = if designer_mode.is_some() {
         state.designer_pid.clone()
     } else {
         state.game_pid.clone()
@@ -1620,8 +1624,8 @@ fn launch_game_sync(
             return get_snapshot(state);
         }
         let mut command = Command::new(&executable);
-        if offline_designer {
-            command.arg("-designer");
+        if let Some(mode) = designer_mode {
+            command.arg(designer_launch_argument(mode)?);
         } else if let Some(server_id) = config.connected_server_id.as_deref() {
             let server = server_by_id(&config, server_id)?;
             let active_account = config
@@ -2476,15 +2480,25 @@ async fn logout_account(state: State<'_, AppState>) -> LauncherResult<LauncherSn
 
 #[tauri::command]
 fn launch_game(app: AppHandle, state: State<'_, AppState>) -> LauncherResult<LauncherSnapshot> {
-    launch_game_sync(&app, state.inner(), false)
+    launch_game_sync(&app, state.inner(), None)
+}
+
+fn designer_launch_argument(mode: &str) -> LauncherResult<&'static str> {
+    match mode {
+        "spacecraft" => Ok("-spacecraft"),
+        "building" => Ok("-building"),
+        "designer" => Ok("-designer"),
+        _ => Err("Unknown offline designer mode.".to_string()),
+    }
 }
 
 #[tauri::command]
 fn launch_offline_designer(
+    mode: String,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> LauncherResult<LauncherSnapshot> {
-    launch_game_sync(&app, state.inner(), true)
+    launch_game_sync(&app, state.inner(), Some(&mode))
 }
 
 #[tauri::command]
@@ -2814,6 +2828,14 @@ mod tests {
     #[test]
     fn xdelta_payload_is_embedded() {
         assert!(XDELTA_BYTES.len() > 500_000);
+    }
+
+    #[test]
+    fn offline_designer_modes_map_to_expected_arguments() {
+        assert_eq!(designer_launch_argument("spacecraft").unwrap(), "-spacecraft");
+        assert_eq!(designer_launch_argument("building").unwrap(), "-building");
+        assert_eq!(designer_launch_argument("designer").unwrap(), "-designer");
+        assert!(designer_launch_argument("unknown").is_err());
     }
 
     #[test]

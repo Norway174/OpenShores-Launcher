@@ -20,7 +20,7 @@ window.launcher = {
   registerAccount: (username, password) => invoke('register_account', { username, password }),
   logoutAccount: () => invoke('logout_account'),
   launch: () => invoke('launch_game'),
-  launchOfflineDesigner: () => invoke('launch_offline_designer'),
+  launchOfflineDesigner: mode => invoke('launch_offline_designer', { mode }),
   stopProcess: process => invoke('stop_game_process', { process }),
   openFolder: () => invoke('open_folder'),
   openLink: url => invoke('open_link', { url }),
@@ -250,8 +250,28 @@ function setUpdateTask(kind, phase, message = '') {
 function renderProcessButton(button, process, running, idleLabel, enabled) {
   const launching = launchingProcesses.has(process);
   button.classList.toggle('process-running', running);
-  button.textContent = running ? 'Running...' : launching ? 'Launching...' : idleLabel;
+  const label = button.querySelector('.process-button-label');
+  const text = running ? 'Running...' : launching ? 'Launching...' : idleLabel;
+  if (label) label.textContent = text;
+  else button.textContent = text;
   button.disabled = launching || (!running && (!enabled || busy));
+}
+
+function closeDesignerMenu() {
+  const control = $('#offline-designer-control');
+  const button = $('#offline-designer');
+  control.classList.remove('open');
+  $('#offline-designer-menu').hidden = true;
+  button.setAttribute('aria-expanded', 'false');
+}
+
+function openDesignerMenu() {
+  const control = $('#offline-designer-control');
+  const button = $('#offline-designer');
+  control.classList.add('open');
+  $('#offline-designer-menu').hidden = false;
+  button.setAttribute('aria-expanded', 'true');
+  $('#offline-designer-menu [role="menuitem"]').focus();
 }
 
 function render(nextState = state) {
@@ -297,7 +317,8 @@ function render(nextState = state) {
     state.installed ? 'Launch OpenShores' : 'Install OpenShores',
     true
   );
-  renderProcessButton(designer, 'designer', !!state.designerRunning, 'Open Offline Designer', state.installed);
+  renderProcessButton(designer, 'designer', !!state.designerRunning, 'Offline Designers...', state.installed);
+  if (state.designerRunning || launchingProcesses.has('designer') || designer.disabled) closeDesignerMenu();
   renderUpdateTasks();
 }
 
@@ -690,7 +711,23 @@ $('#primary-action').addEventListener('click', () => {
 });
 $('#offline-designer').addEventListener('click', () => {
   if (state.designerRunning) openStopModal('designer');
-  else launchProcess('designer', window.launcher.launchOfflineDesigner);
+  else if ($('#offline-designer-menu').hidden) openDesignerMenu();
+  else closeDesignerMenu();
+});
+$('#offline-designer-menu').addEventListener('click', event => {
+  const option = event.target.closest('[data-designer-mode]');
+  if (!option) return;
+  const mode = option.dataset.designerMode;
+  closeDesignerMenu();
+  launchProcess('designer', () => window.launcher.launchOfflineDesigner(mode));
+});
+document.addEventListener('click', event => {
+  if (!event.target.closest('#offline-designer-control')) closeDesignerMenu();
+});
+document.addEventListener('keydown', event => {
+  if (event.key !== 'Escape' || $('#offline-designer-menu').hidden) return;
+  closeDesignerMenu();
+  $('#offline-designer').focus();
 });
 $('#cancel-stop-process').addEventListener('click', closeStopModal);
 $('#stop-process-modal').addEventListener('click', event => { if (event.target === event.currentTarget) closeStopModal(); });
@@ -757,6 +794,41 @@ document.addEventListener('keydown', event => {
   }
 });
 document.querySelectorAll('[data-url]').forEach(button => button.addEventListener('click', () => window.launcher.openLink(button.dataset.url).catch(showError)));
+
+const creatorCredit = $('.creator-credit');
+let creatorHeartsUnlocked = false;
+
+function releaseCreatorHearts(count) {
+  const creditBounds = creatorCredit.getBoundingClientRect();
+  const colors = ['#ff769d', '#ff9fba', '#f36f92', '#ffc0d1', '#e885ad'];
+
+  for (let index = 0; index < count; index += 1) {
+    const heart = document.createElement('span');
+    const duration = 1700 + Math.random() * 1100;
+    heart.className = 'creator-heart';
+    heart.textContent = '\u2665';
+    heart.setAttribute('aria-hidden', 'true');
+    heart.style.left = `${creditBounds.left + Math.random() * creditBounds.width}px`;
+    heart.style.top = `${creditBounds.top + creditBounds.height * .25}px`;
+    heart.style.setProperty('--heart-color', colors[Math.floor(Math.random() * colors.length)]);
+    heart.style.setProperty('--heart-size', `${7 + Math.random() * 7}px`);
+    heart.style.setProperty('--heart-drift', `${-34 + Math.random() * 68}px`);
+    heart.style.setProperty('--heart-rise', `${-55 - Math.random() * 55}px`);
+    heart.style.setProperty('--heart-turn', `${-25 + Math.random() * 50}deg`);
+    heart.style.setProperty('--heart-duration', `${duration}ms`);
+    heart.style.animationDelay = `${Math.random() * 220}ms`;
+    document.body.appendChild(heart);
+    heart.addEventListener('animationend', () => heart.remove(), { once: true });
+  }
+}
+
+creatorCredit.addEventListener('dblclick', () => {
+  creatorHeartsUnlocked = true;
+  releaseCreatorHearts(8);
+});
+creatorCredit.addEventListener('click', () => {
+  if (creatorHeartsUnlocked) releaseCreatorHearts(3);
+});
 
 async function loadPatchReleases() {
   const select = $('#patch-release');
