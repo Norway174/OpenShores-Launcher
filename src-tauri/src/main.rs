@@ -45,7 +45,6 @@ const MANIFEST_FILE: &str = ".openshores-launcher.json";
 const MANAGED_BY: &str = "OpenShores Launcher";
 const LATEST_PATCH_RELEASE: &str = "latest";
 const PATCH_ORIGINALS_DIR: &str = ".openshores-patch-originals";
-const PATCH_CHECK_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const XDELTA_TIMEOUT: Duration = Duration::from_secs(120);
 const XDELTA_NAME: &str = "xdelta3-3.0.11-x86_64.exe";
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -1787,6 +1786,67 @@ fn check_updates_sync(
     Ok(status)
 }
 
+fn check_ip_patch_update_sync() -> LauncherResult<UpdaterStatusPayload> {
+    let config = load_config()?;
+    let install_path = PathBuf::from(config.install_path.clone().unwrap());
+    if !is_managed_manifest(read_json::<Value>(&install_path.join(MANIFEST_FILE)).as_ref()) {
+        return Ok(UpdaterStatusPayload {
+            state: "current".to_string(),
+            message: "Install OpenShores before checking the IP patch.".to_string(),
+        });
+    }
+
+    let client = http_client()?;
+    let releases = fetch_patch_releases(&client)?;
+    let release = resolve_patch_release(&releases, &config.ip_patch_release)?;
+    if config.applied_ip_patch_release.as_deref() == Some(&release.tag_name) {
+        return Ok(UpdaterStatusPayload {
+            state: "current".to_string(),
+            message: format!("IP patch {} is up to date.", release.tag_name),
+        });
+    }
+
+    Ok(UpdaterStatusPayload {
+        state: "available".to_string(),
+        message: format!("IP patch {} is available.", release.tag_name),
+    })
+}
+
+fn game_manifest_update_available(local: Option<&Value>, remote: &GameManifest) -> bool {
+    let Some(local) = local else {
+        return false;
+    };
+    local.get("gameManifestVersion").and_then(Value::as_str) != Some(remote.version.as_str())
+        || local.get("gameManifestGenerated").and_then(Value::as_u64) != Some(remote.generated)
+        || local.get("gameManifestFileCount").and_then(Value::as_u64)
+            != Some(remote.files.len() as u64)
+}
+
+fn check_game_update_sync() -> LauncherResult<UpdaterStatusPayload> {
+    let config = load_config()?;
+    let install_path = PathBuf::from(config.install_path.clone().unwrap());
+    let local = read_json::<Value>(&install_path.join(MANIFEST_FILE));
+    if !is_managed_manifest(local.as_ref()) || !install_path.join(GAME_EXE).is_file() {
+        return Ok(UpdaterStatusPayload {
+            state: "current".to_string(),
+            message: "Install OpenShores before checking game files.".to_string(),
+        });
+    }
+
+    let remote = fetch_game_manifest(&http_client()?)?;
+    if game_manifest_update_available(local.as_ref(), &remote) {
+        Ok(UpdaterStatusPayload {
+            state: "available".to_string(),
+            message: format!("OpenShores client {} is available.", remote.version),
+        })
+    } else {
+        Ok(UpdaterStatusPayload {
+            state: "current".to_string(),
+            message: "OpenShores game files are up to date.".to_string(),
+        })
+    }
+}
+
 fn report_previous_update_error(app: &AppHandle) {
     let Ok(path) = launcher_data_path().map(|path| path.join("update-error.log")) else {
         return;
@@ -2086,15 +2146,11 @@ async fn get_ip_patch_releases() -> LauncherResult<Vec<PatchReleaseOption>> {
 
 #[tauri::command]
 async fn set_ip_patch_release(
-    app: AppHandle,
     state: State<'_, AppState>,
     selection: String,
 ) -> LauncherResult<LauncherSnapshot> {
     save_patch_selection(selection)?;
-    let backend = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || update_ip_patch_sync(&app, &backend, false))
-        .await
-        .map_err(error_string)?
+    get_snapshot(state.inner())
 }
 
 #[tauri::command]
@@ -2506,6 +2562,20 @@ async fn check_updates(
         .map_err(error_string)?
 }
 
+#[tauri::command]
+async fn check_ip_patch_update() -> LauncherResult<UpdaterStatusPayload> {
+    tauri::async_runtime::spawn_blocking(check_ip_patch_update_sync)
+        .await
+        .map_err(error_string)?
+}
+
+#[tauri::command]
+async fn check_game_update() -> LauncherResult<UpdaterStatusPayload> {
+    tauri::async_runtime::spawn_blocking(check_game_update_sync)
+        .await
+        .map_err(error_string)?
+}
+
 fn install_launcher_update_sync(app: &AppHandle, state: &AppState) -> LauncherResult<bool> {
     let pending = state
         .pending_update
@@ -2630,6 +2700,8 @@ fn main() {
             open_folder,
             open_link,
             check_updates,
+            check_ip_patch_update,
+            check_game_update,
             install_launcher_update,
         ])
         .setup(|app| {
@@ -2650,15 +2722,9 @@ fn main() {
                 .data_directory(webview_data)
                 .build()?;
             let app_handle = app.handle().clone();
-            let backend = app.state::<AppState>().inner().clone();
             thread::spawn(move || {
                 thread::sleep(Duration::from_secs(1));
                 report_previous_update_error(&app_handle);
-                thread::sleep(Duration::from_secs(2));
-                loop {
-                    let _ = update_ip_patch_sync(&app_handle, &backend, false);
-                    thread::sleep(PATCH_CHECK_INTERVAL);
-                }
             });
             Ok(())
         })
@@ -2689,6 +2755,24 @@ mod tests {
                 },
             ],
         }
+    }
+
+    #[test]
+    fn game_update_check_compares_manifest_identity() {
+        let remote = test_game_manifest();
+        let current = json!({
+            "gameManifestVersion": remote.version.clone(),
+            "gameManifestGenerated": remote.generated,
+            "gameManifestFileCount": remote.files.len()
+        });
+        assert!(!game_manifest_update_available(Some(&current), &remote));
+
+        let older = json!({
+            "gameManifestVersion": "older",
+            "gameManifestGenerated": remote.generated,
+            "gameManifestFileCount": remote.files.len()
+        });
+        assert!(game_manifest_update_available(Some(&older), &remote));
     }
 
     #[test]

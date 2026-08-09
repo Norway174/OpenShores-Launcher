@@ -10,6 +10,7 @@
 <body>
   <div class="window-frame">
     <main>
+      <div id="update-banners" class="update-banners" aria-live="polite"></div>
       <div class="space-banner" data-figma-node="1:66">
         <img class="banner-art" src="assets/space-banner.png" alt="Planets in the OpenShores universe">
         <img class="banner-logo" src="assets/header-icon.png" alt="OpenShores">
@@ -112,15 +113,15 @@
                 <label>Game installation folder</label>
                 <div class="path-row"><div id="install-path" class="path-value">—</div><button id="open-folder" class="secondary" disabled>Open folder</button><button id="choose-folder" class="secondary">Browse…</button></div>
               </div>
-              <div class="setting-row"><div><strong>IP patch release</strong><p>Use the newest release automatically, or pin a specific release.</p></div><div class="setting-control"><select id="patch-release" aria-label="IP patch release"><option value="latest">Latest Release</option></select><button id="update-patch" class="secondary">Update patch</button></div></div>
-              <div class="setting-row"><div><strong>Refresh game files</strong><p>Verify clean source files, download changes, and reapply the selected IP patch.</p></div><button id="refresh-game" class="secondary">Update game</button></div>
+              <div class="setting-row"><div><strong>IP patch release</strong><p>Use the newest release automatically, or pin a specific release.</p></div><div class="setting-control"><select id="patch-release" aria-label="IP patch release"><option value="latest">Latest Release</option></select><span class="update-button-wrap" data-tooltip=""><button id="update-patch" class="secondary update-task-button"><span class="button-label">Update patch</span><span class="button-progress"></span></button></span></div></div>
+              <div class="setting-row"><div><strong>Refresh game files</strong><p>Verify clean source files, download changes, and reapply the selected IP patch.</p></div><span class="update-button-wrap" data-tooltip=""><button id="refresh-game" class="secondary update-task-button"><span class="button-label">Update game</span><span class="button-progress"></span></button></span></div>
               <div class="setting-row danger-row"><div><strong>Uninstall game</strong><p>Remove only launcher-managed files from the selected folder.</p></div><button id="uninstall" class="danger">Uninstall</button></div>
             </div>
           </div>
           <div class="settings-group">
             <h2>Launcher settings</h2>
             <div class="settings-list">
-              <div class="setting-row"><div><strong>Launcher updates</strong><p>Check the GitHub releases feed for a newer launcher.</p><p id="update-check-result" class="update-check-result hidden" role="status" aria-live="polite"></p></div><button id="check-updates" class="secondary">Check now</button></div>
+              <div class="setting-row"><div><strong>Launcher updates</strong><p>Check the GitHub releases feed for a newer launcher.</p><p id="update-check-result" class="update-check-result hidden" role="status" aria-live="polite"></p></div><span class="update-button-wrap" data-tooltip=""><button id="check-updates" class="secondary update-task-button"><span class="button-label">Check now</span><span class="button-progress"></span></button></span></div>
             </div>
           </div>
           <div class="links">
@@ -147,22 +148,6 @@
       <p class="field-help">Enter a hostname without a path. Account requests use its base domain.</p>
       <div id="server-modal-error" class="error-box hidden"></div>
       <div class="dialog-actions"><button id="cancel-server-modal" class="secondary">Cancel</button><button id="save-server" class="primary">Save server</button></div>
-    </section>
-  </div>
-
-  <div id="update-modal" class="modal-backdrop hidden">
-    <section class="update-dialog" role="dialog" aria-modal="true" aria-labelledby="update-dialog-title" aria-describedby="update-message">
-      <button id="dismiss-update" class="dialog-close" aria-label="Close update notification" title="Close">&times;</button>
-      <div class="update-icon" aria-hidden="true"><span>&darr;</span></div>
-      <div class="update-dialog-copy">
-        <span class="kicker">LAUNCHER UPDATE</span>
-        <h2 id="update-dialog-title">A new version is available</h2>
-        <p id="update-message">A newer OpenShores Launcher is ready to download.</p>
-      </div>
-      <div class="update-dialog-actions">
-        <button id="update-later" class="secondary">Later</button>
-        <button id="install-update" class="primary">Download &amp; restart</button>
-      </div>
     </section>
   </div>
 
