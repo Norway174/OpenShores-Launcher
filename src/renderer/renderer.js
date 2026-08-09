@@ -11,7 +11,17 @@ window.launcher = {
   setPatchRelease: selection => invoke('set_ip_patch_release', { selection }),
   updatePatch: () => invoke('update_ip_patch'),
   uninstall: () => invoke('uninstall_game'),
+  addServer: (nickname, host) => invoke('add_server', { nickname, host }),
+  editServer: (serverId, nickname, host) => invoke('edit_server', { serverId, nickname, host }),
+  removeServer: serverId => invoke('remove_server', { serverId }),
+  connectServer: serverId => invoke('connect_server', { serverId }),
+  refreshServerStatuses: () => invoke('refresh_server_statuses'),
+  loginAccount: (username, password) => invoke('login_account', { username, password }),
+  registerAccount: (username, password) => invoke('register_account', { username, password }),
+  logoutAccount: () => invoke('logout_account'),
   launch: () => invoke('launch_game'),
+  launchOfflineDesigner: () => invoke('launch_offline_designer'),
+  stopProcess: process => invoke('stop_game_process', { process }),
   openFolder: () => invoke('open_folder'),
   openLink: url => invoke('open_link', { url }),
   checkUpdates: () => invoke('check_updates'),
@@ -29,6 +39,113 @@ let state = null;
 let busy = false;
 let updateModalLocked = false;
 let updateModalPreviousFocus = null;
+let serverStatusTimer = null;
+let serverRefreshBusy = false;
+let registering = false;
+const launchingProcesses = new Set();
+let pendingStopProcess = null;
+let stopModalPreviousFocus = null;
+
+function connectedServer() {
+  return state?.servers?.find(server => server.id === state.connectedServerId) || null;
+}
+
+function statusLabel(value) {
+  return value === 'online' ? 'Online' : value === 'offline' ? 'Offline' : 'Unavailable';
+}
+
+function renderServiceState() {
+  const indicator = $('#service-state');
+  const server = connectedServer();
+  const online = !!server && ['login', 'scene', 'chat'].every(service => server.status?.[service] === 'online');
+  indicator.classList.toggle('online', online);
+  indicator.classList.toggle('offline', !online);
+  indicator.querySelector('span').textContent = online ? 'ONLINE' : server ? 'OFFLINE' : 'NOT CONNECTED';
+}
+
+function makeStatus(name, value) {
+  const row = document.createElement('div');
+  row.className = 'server-service';
+  const label = document.createElement('span');
+  label.textContent = name;
+  const stateLabel = document.createElement('strong');
+  stateLabel.className = `service-value ${value === 'online' ? 'online' : value === 'offline' ? 'offline' : 'unknown'}`;
+  stateLabel.textContent = statusLabel(value);
+  row.append(label, stateLabel);
+  return row;
+}
+
+function renderServers() {
+  const list = $('#server-list');
+  list.replaceChildren();
+  const servers = state.servers || [];
+  $('#server-empty').classList.toggle('hidden', servers.length > 0);
+  for (const server of servers) {
+    const card = document.createElement('article');
+    card.className = `server-card${server.id === state.connectedServerId ? ' connected' : ''}`;
+    const top = document.createElement('div');
+    top.className = 'server-card-top';
+    const identity = document.createElement('div');
+    const title = document.createElement('h2');
+    title.textContent = server.nickname;
+    const host = document.createElement('p');
+    host.textContent = server.host;
+    identity.append(title, host);
+    const online = ['login', 'scene', 'chat'].every(service => server.status?.[service] === 'online');
+    const connect = document.createElement('button');
+    connect.className = server.id === state.connectedServerId ? 'secondary connected-button' : 'primary compact';
+    connect.dataset.action = 'connect';
+    connect.dataset.serverId = server.id;
+    connect.textContent = server.id === state.connectedServerId ? 'Disconnect' : 'Connect';
+    connect.disabled = server.id !== state.connectedServerId && !online;
+    connect.title = connect.disabled ? 'This server must be online before you can connect.' : '';
+    const controls = document.createElement('div');
+    controls.className = 'server-card-controls';
+    const tools = document.createElement('div');
+    tools.className = 'server-card-tools';
+    const edit = document.createElement('button');
+    edit.className = 'icon-button';
+    edit.dataset.action = 'edit';
+    edit.dataset.serverId = server.id;
+    edit.setAttribute('aria-label', `Edit ${server.nickname}`);
+    edit.title = 'Edit server';
+    edit.textContent = 'Edit';
+    const remove = document.createElement('button');
+    remove.className = 'icon-button danger-text';
+    remove.dataset.action = 'remove';
+    remove.dataset.serverId = server.id;
+    remove.setAttribute('aria-label', `Remove ${server.nickname}`);
+    remove.title = 'Remove server';
+    remove.textContent = '×';
+    tools.append(edit, remove);
+    controls.append(tools, connect);
+    top.append(identity, controls);
+    const services = document.createElement('div');
+    services.className = 'server-services';
+    services.append(
+      makeStatus('Login Server', server.status?.login),
+      makeStatus('Scene Server', server.status?.scene),
+      makeStatus('Chat Server', server.status?.chat)
+    );
+    card.append(top, services);
+    list.append(card);
+  }
+}
+
+function renderAccount() {
+  const server = connectedServer();
+  const tab = $('#account-tab');
+  tab.disabled = !server;
+  $('#account-tab-wrap').classList.toggle('tooltip-enabled', !server);
+  if (!server && tab.classList.contains('active')) switchView('home');
+  $('#account-server-copy').textContent = server ? `Connected to ${server.nickname} · ${server.host}` : 'Connect to a server to continue.';
+  $('#account-login-title').textContent = server ? `Login to ${server.nickname}` : 'Login';
+  $('#account-login-address').textContent = server?.host || '—';
+  const loggedIn = !!state.accountUsername;
+  $('#account-logged-out').classList.toggle('hidden', loggedIn);
+  $('#account-logged-in').classList.toggle('hidden', !loggedIn);
+  $('#account-name').textContent = state.accountUsername || '';
+}
 
 function showError(error) {
   const box = $('#error-box');
@@ -65,6 +182,13 @@ function setUpdateModalLocked(locked) {
   $('#update-later').classList.toggle('hidden', locked);
 }
 
+function renderProcessButton(button, process, running, idleLabel, enabled) {
+  const launching = launchingProcesses.has(process);
+  button.classList.toggle('process-running', running);
+  button.textContent = running ? 'Running...' : launching ? 'Launching...' : idleLabel;
+  button.disabled = launching || (!running && (!enabled || busy));
+}
+
 function render(nextState = state) {
   if (!nextState) return;
   state = nextState;
@@ -76,30 +200,41 @@ function render(nextState = state) {
   $('#patch-channel').textContent = state.ipPatchRelease === 'latest' ? 'Latest Release' : state.ipPatchRelease;
   $('#patch-release').value = state.ipPatchRelease || 'latest';
   $('#patch-badge').classList.toggle('hidden', !state.installed);
-  $('#open-folder').classList.toggle('hidden', !state.installed);
+  $('#game-source').textContent = connectedServer()?.host || 'No server selected';
+  const anyProcessRunning = state.gameRunning || state.designerRunning;
+  $('#open-folder').disabled = !state.installed || busy;
   $('#uninstall').disabled = !state.installed || busy;
-  $('#refresh-game').disabled = !state.installed || busy || state.gameRunning;
-  $('#update-patch').disabled = !state.installed || busy || state.gameRunning;
+  $('#refresh-game').disabled = !state.installed || busy || anyProcessRunning;
+  $('#update-patch').disabled = !state.installed || busy || anyProcessRunning;
   $('#patch-release').disabled = busy;
-  $('#choose-folder').disabled = busy || state.installed;
+  $('#choose-folder').disabled = busy || anyProcessRunning;
+  $('#choose-folder').textContent = state.installed ? 'Move…' : 'Browse…';
+  renderServers();
+  renderAccount();
+  renderServiceState();
   const primary = $('#primary-action');
+  const designer = $('#offline-designer');
   const dot = $('#status-dot');
   dot.className = 'large-dot';
-  if (state.gameRunning) {
-    $('#status-text').textContent = 'OpenShores is running';
+  if (anyProcessRunning) {
+    $('#status-text').textContent = state.gameRunning && state.designerRunning
+      ? 'OpenShores and Offline Designer are running'
+      : state.gameRunning ? 'OpenShores is running' : 'Offline Designer is running';
     dot.classList.add('running');
-    primary.textContent = 'Game running';
-    primary.disabled = true;
   } else if (state.installed) {
     $('#status-text').textContent = 'Ready to play';
     dot.classList.add('ready');
-    primary.textContent = 'Launch OpenShores';
-    primary.disabled = busy;
   } else {
     $('#status-text').textContent = 'Not installed';
-    primary.textContent = 'Install OpenShores';
-    primary.disabled = busy;
   }
+  renderProcessButton(
+    primary,
+    'game',
+    !!state.gameRunning,
+    state.installed ? 'Launch OpenShores' : 'Install OpenShores',
+    true
+  );
+  renderProcessButton(designer, 'designer', !!state.designerRunning, 'Open Offline Designer', state.installed);
 }
 
 async function runOperation(operation, showProgress = true) {
@@ -124,11 +259,32 @@ async function runOperation(operation, showProgress = true) {
   }
 }
 
+async function launchProcess(process, operation) {
+  if (launchingProcesses.has(process)) return;
+  launchingProcesses.add(process);
+  clearError();
+  render();
+  try {
+    state = { ...state, ...(await operation()) };
+  } catch (error) {
+    showError(error);
+    try {
+      state = { ...state, ...(await window.launcher.getState()) };
+    } catch (_) {
+      // Keep the last known state when a refresh is unavailable.
+    }
+  } finally {
+    launchingProcesses.delete(process);
+    render();
+  }
+}
+
 window.launcher.onProgress(data => {
   $('#progress-area').classList.remove('hidden');
   $('#progress-phase').textContent = data.phase;
   $('#progress-percent').textContent = `${data.percent}%`;
   $('#progress-bar').style.width = `${data.percent}%`;
+  $('#progress-bar').classList.toggle('complete', data.percent >= 100);
   $('#progress-detail').textContent = data.detail;
 });
 
@@ -138,6 +294,7 @@ window.launcher.onOperationStatus(data => {
     $('#progress-phase').textContent = 'IP patch update failed';
     $('#progress-percent').textContent = 'Failed';
     $('#progress-bar').style.width = '0';
+    $('#progress-bar').classList.remove('complete');
     $('#progress-detail').textContent = data.error;
     showError(data.error);
   }
@@ -145,7 +302,8 @@ window.launcher.onOperationStatus(data => {
 });
 
 window.launcher.onGameStatus(data => {
-  state.gameRunning = data.running;
+  if (data.process === 'designer') state.designerRunning = data.running;
+  else state.gameRunning = data.running;
   if (data.error) showError(data.error);
   render();
 });
@@ -185,15 +343,244 @@ function handleUpdaterStatus(data) {
 
 window.launcher.onUpdaterStatus(handleUpdaterStatus);
 
-document.querySelectorAll('.nav-item').forEach(button => button.addEventListener('click', () => {
+function switchView(viewName) {
+  const button = document.querySelector(`.nav-item[data-view="${viewName}"]`);
+  if (!button || button.disabled) return;
   document.querySelectorAll('.nav-item').forEach(item => item.classList.toggle('active', item === button));
   document.querySelectorAll('.view').forEach(view => view.classList.remove('active'));
-  $(`#${button.dataset.view}-view`).classList.add('active');
-}));
+  $(`#${viewName}-view`).classList.add('active');
+}
 
-$('#primary-action').addEventListener('click', () => state.installed ? runOperation(window.launcher.launch, false) : runOperation(window.launcher.install));
+document.querySelectorAll('.nav-item').forEach(button => button.addEventListener('click', () => switchView(button.dataset.view)));
+
+function showServerDialog(server = null) {
+  $('#server-edit-id').value = server?.id || '';
+  $('#server-nickname').value = server?.nickname || '';
+  $('#server-host').value = server?.host || '';
+  $('#server-dialog-title').textContent = server ? 'Edit server' : 'Add server';
+  $('#server-modal-error').classList.add('hidden');
+  $('#server-modal').classList.remove('hidden');
+  window.setTimeout(() => $('#server-nickname').focus(), 0);
+}
+
+function closeServerDialog() { $('#server-modal').classList.add('hidden'); }
+
+async function updateServerState(operation, errorTarget = '#server-error') {
+  const error = $(errorTarget);
+  error.classList.add('hidden');
+  try {
+    render(await operation());
+    return true;
+  } catch (reason) {
+    error.textContent = reason?.message || String(reason);
+    error.classList.remove('hidden');
+    return false;
+  }
+}
+
+async function withMinimumDelay(operation, milliseconds = 650) {
+  const started = performance.now();
+  try {
+    return await operation();
+  } finally {
+    const remaining = milliseconds - (performance.now() - started);
+    if (remaining > 0) await new Promise(resolve => window.setTimeout(resolve, remaining));
+  }
+}
+
+$('#add-server').addEventListener('click', () => showServerDialog());
+$('#refresh-servers').addEventListener('click', () => refreshServerStatuses(true));
+$('#cancel-server-modal').addEventListener('click', closeServerDialog);
+$('#dismiss-server-modal').addEventListener('click', closeServerDialog);
+$('#server-modal').addEventListener('click', event => { if (event.target === event.currentTarget) closeServerDialog(); });
+$('#save-server').addEventListener('click', async () => {
+  const id = $('#server-edit-id').value;
+  const nickname = $('#server-nickname').value;
+  const host = $('#server-host').value;
+  $('#save-server').disabled = true;
+  const saved = await updateServerState(
+    () => id ? window.launcher.editServer(id, nickname, host) : window.launcher.addServer(nickname, host),
+    '#server-modal-error'
+  );
+  $('#save-server').disabled = false;
+  if (saved) {
+    closeServerDialog();
+    refreshServerStatuses();
+  }
+});
+
+$('#server-list').addEventListener('click', async event => {
+  const button = event.target.closest('button[data-action]');
+  if (!button) return;
+  const server = state.servers.find(item => item.id === button.dataset.serverId);
+  if (!server) return;
+  if (button.dataset.action === 'edit') {
+    showServerDialog(server);
+    return;
+  }
+  if (button.dataset.action === 'remove') {
+    if (!window.confirm(`Remove ${server.nickname} from your server list?`)) return;
+    await updateServerState(() => window.launcher.removeServer(server.id));
+    return;
+  }
+  if (button.dataset.action === 'connect') {
+    const connecting = server.id !== state.connectedServerId;
+    if (connecting) {
+      button.disabled = true;
+      button.classList.add('connecting');
+      button.textContent = 'Connecting';
+    }
+    const connected = await updateServerState(() => connecting
+      ? withMinimumDelay(() => window.launcher.connectServer(server.id))
+      : window.launcher.connectServer(null));
+    if (!connected) {
+      try { render(await window.launcher.getState()); } catch (_) { /* Keep the last known state. */ }
+    }
+  }
+});
+
+function setRegistering(value) {
+  registering = value;
+  $('#confirm-password-label').classList.toggle('hidden', !value);
+  $('#account-password-confirm').classList.toggle('hidden', !value);
+  $('#login-account').classList.toggle('hidden', value);
+  $('#cancel-register').classList.toggle('hidden', !value);
+  $('#register-account').textContent = value ? 'Create account' : 'Register';
+  $('#account-password').autocomplete = value ? 'new-password' : 'current-password';
+  if (!value) $('#account-password-confirm').value = '';
+}
+
+async function runAccountAction(operation) {
+  const error = $('#account-error');
+  error.classList.add('hidden');
+  for (const button of document.querySelectorAll('.account-actions button, #logout-account')) button.disabled = true;
+  try {
+    render(await operation());
+    $('#account-password').value = '';
+    $('#account-password-confirm').value = '';
+    setRegistering(false);
+  } catch (reason) {
+    error.textContent = reason?.message || String(reason);
+    error.classList.remove('hidden');
+  } finally {
+    for (const button of document.querySelectorAll('.account-actions button, #logout-account')) button.disabled = false;
+  }
+}
+
+$('#login-account').addEventListener('click', () => runAccountAction(() => window.launcher.loginAccount($('#account-username').value, $('#account-password').value)));
+$('#register-account').addEventListener('click', () => {
+  if (!registering) {
+    setRegistering(true);
+    $('#account-password').focus();
+    return;
+  }
+  if ($('#account-password').value !== $('#account-password-confirm').value) {
+    $('#account-error').textContent = 'Passwords do not match.';
+    $('#account-error').classList.remove('hidden');
+    return;
+  }
+  runAccountAction(() => window.launcher.registerAccount($('#account-username').value, $('#account-password').value));
+});
+$('#cancel-register').addEventListener('click', () => setRegistering(false));
+$('#logout-account').addEventListener('click', () => runAccountAction(window.launcher.logoutAccount));
+$('#account-password').addEventListener('keydown', event => { if (event.key === 'Enter' && !registering) $('#login-account').click(); });
+$('#account-password-confirm').addEventListener('keydown', event => { if (event.key === 'Enter' && registering) $('#register-account').click(); });
+
+async function refreshServerStatuses(manual = false) {
+  const button = $('#refresh-servers');
+  if (serverRefreshBusy) return;
+  serverRefreshBusy = true;
+  if (manual) {
+    button.disabled = true;
+    button.textContent = 'Refreshing...';
+    $('#server-error').classList.add('hidden');
+  }
+  try {
+    render(await window.launcher.refreshServerStatuses());
+  } catch (reason) {
+    if (manual) {
+      $('#server-error').textContent = reason?.message || String(reason);
+      $('#server-error').classList.remove('hidden');
+    }
+  } finally {
+    serverRefreshBusy = false;
+    if (manual) {
+      button.disabled = false;
+      button.textContent = 'Refresh';
+    }
+  }
+}
+
+function openStopModal(process) {
+  pendingStopProcess = process;
+  stopModalPreviousFocus = document.activeElement;
+  const label = process === 'designer' ? 'Offline Designer' : 'OpenShores';
+  $('#stop-process-name').textContent = label;
+  $('#stop-process-modal').classList.remove('hidden');
+  window.setTimeout(() => $('#cancel-stop-process').focus(), 0);
+}
+
+function closeStopModal() {
+  if ($('#confirm-stop-process').disabled) return;
+  $('#stop-process-modal').classList.add('hidden');
+  pendingStopProcess = null;
+  if (stopModalPreviousFocus?.focus) stopModalPreviousFocus.focus();
+}
+
+$('#primary-action').addEventListener('click', () => {
+  if (state.gameRunning) openStopModal('game');
+  else if (state.installed) launchProcess('game', window.launcher.launch);
+  else runOperation(window.launcher.install);
+});
+$('#offline-designer').addEventListener('click', () => {
+  if (state.designerRunning) openStopModal('designer');
+  else launchProcess('designer', window.launcher.launchOfflineDesigner);
+});
+$('#cancel-stop-process').addEventListener('click', closeStopModal);
+$('#stop-process-modal').addEventListener('click', event => { if (event.target === event.currentTarget) closeStopModal(); });
+$('#confirm-stop-process').addEventListener('click', async () => {
+  if (!pendingStopProcess) return;
+  const process = pendingStopProcess;
+  const button = $('#confirm-stop-process');
+  button.disabled = true;
+  button.textContent = 'Stopping...';
+  clearError();
+  try {
+    render(await window.launcher.stopProcess(process));
+    button.disabled = false;
+    closeStopModal();
+  } catch (error) {
+    showError(error);
+  } finally {
+    button.disabled = false;
+    button.textContent = 'Yes';
+  }
+});
 $('#open-folder').addEventListener('click', () => window.launcher.openFolder().catch(showError));
-$('#choose-folder').addEventListener('click', async () => { clearError(); try { const next = await window.launcher.chooseFolder(); if (next) render(next); } catch (error) { showError(error); } });
+$('#choose-folder').addEventListener('click', async () => {
+  clearError();
+  if (state.installed) {
+    $('#progress-area').classList.remove('hidden');
+    $('#progress-phase').textContent = 'Choose a destination';
+    $('#progress-percent').textContent = '0%';
+    $('#progress-bar').style.width = '0';
+    $('#progress-bar').classList.remove('complete');
+    $('#progress-detail').textContent = 'Select an empty folder for the OpenShores installation.';
+    switchView('home');
+    await runOperation(async () => {
+      const next = await window.launcher.chooseFolder();
+      if (!next) $('#progress-area').classList.add('hidden');
+      return next || state;
+    });
+    return;
+  }
+  try {
+    const next = await window.launcher.chooseFolder();
+    if (next) render(next);
+  } catch (error) {
+    showError(error);
+  }
+});
 $('#uninstall').addEventListener('click', () => runOperation(window.launcher.uninstall));
 $('#refresh-game').addEventListener('click', () => runOperation(window.launcher.install));
 $('#update-patch').addEventListener('click', () => runOperation(window.launcher.updatePatch));
@@ -235,7 +622,13 @@ $('#install-update').addEventListener('click', async () => {
 $('#update-later').addEventListener('click', closeUpdateModal);
 $('#dismiss-update').addEventListener('click', closeUpdateModal);
 $('#update-modal').addEventListener('click', event => { if (event.target === event.currentTarget) closeUpdateModal(); });
-document.addEventListener('keydown', event => { if (event.key === 'Escape') closeUpdateModal(); });
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape') {
+    closeUpdateModal();
+    closeServerDialog();
+    closeStopModal();
+  }
+});
 $('#minimize').addEventListener('click', () => window.launcher.minimize());
 $('#close').addEventListener('click', () => window.launcher.close());
 document.querySelectorAll('[data-url]').forEach(button => button.addEventListener('click', () => window.launcher.openLink(button.dataset.url).catch(showError)));
@@ -266,6 +659,8 @@ async function loadPatchReleases() {
 window.launcher.getState().then(nextState => {
   render(nextState);
   loadPatchReleases();
+  refreshServerStatuses();
+  serverStatusTimer = window.setInterval(refreshServerStatuses, 10000);
 }).catch(error => {
   $('#startup-placeholder').querySelector('strong').textContent = 'Startup could not finish';
   $('#startup-placeholder').querySelector('p').textContent = 'The error below can be selected and copied.';

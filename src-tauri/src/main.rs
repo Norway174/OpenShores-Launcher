@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use psl::{List, Psl};
 use reqwest::{
     blocking::{Client, Response},
     Url,
@@ -8,8 +9,10 @@ use rfd::{MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
 use semver::Version;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha1::Sha1;
 use sha2::{Digest, Sha256};
 use std::{
+    collections::HashMap,
     env,
     fs::{self, File},
     io::{Read, Write},
@@ -29,9 +32,14 @@ use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use std::os::windows::process::CommandExt;
 
 #[cfg(windows)]
-fn hide_native_window_border(window: &WebviewWindow) {
+use winreg::{enums::HKEY_USERS, RegKey};
+
+#[cfg(windows)]
+fn apply_native_window_frame(window: &WebviewWindow) {
+    const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
     const DWMWA_BORDER_COLOR: u32 = 34;
-    const DWMWA_COLOR_NONE: u32 = 0xffff_fffe;
+    const DWMWA_COLOR_DEFAULT: u32 = 0xffff_ffff;
+    const DWMWCP_ROUND: u32 = 2;
 
     #[link(name = "dwmapi")]
     unsafe extern "system" {
@@ -48,7 +56,13 @@ fn hide_native_window_border(window: &WebviewWindow) {
             let _ = DwmSetWindowAttribute(
                 hwnd.0,
                 DWMWA_BORDER_COLOR,
-                (&DWMWA_COLOR_NONE as *const u32).cast(),
+                (&DWMWA_COLOR_DEFAULT as *const u32).cast(),
+                std::mem::size_of::<u32>() as u32,
+            );
+            let _ = DwmSetWindowAttribute(
+                hwnd.0,
+                DWMWA_WINDOW_CORNER_PREFERENCE,
+                (&DWMWCP_ROUND as *const u32).cast(),
                 std::mem::size_of::<u32>() as u32,
             );
         }
@@ -70,6 +84,8 @@ const PATCH_CHECK_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const XDELTA_TIMEOUT: Duration = Duration::from_secs(120);
 const XDELTA_NAME: &str = "xdelta3-3.0.11-x86_64.exe";
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+const DEFAULT_SERVER_HOST: &str = "play.openshores.net";
+const ACCOUNT_REGISTRY_PATH: &str = r"S-1-5-21-3753878440-1344555032-1767538306-1002\Software\Software Engineering\Shores of Hazeron\Account";
 const XDELTA_BYTES: &[u8] = include_bytes!("../../resources/xdelta3/xdelta3-3.0.11-x86_64.exe");
 
 type LauncherResult<T> = Result<T, String>;
@@ -78,7 +94,10 @@ type LauncherResult<T> = Result<T, String>;
 struct AppState {
     active_operation: Arc<AtomicBool>,
     game_pid: Arc<Mutex<Option<u32>>>,
+    designer_pid: Arc<Mutex<Option<u32>>>,
     pending_update: Arc<Mutex<Option<PendingUpdate>>>,
+    server_statuses: Arc<Mutex<HashMap<String, ServerStatus>>>,
+    account_clients: Arc<Mutex<HashMap<String, Client>>>,
 }
 
 #[derive(Clone)]
@@ -106,6 +125,16 @@ struct LauncherConfig {
         skip_serializing_if = "Option::is_none"
     )]
     applied_ip_patch_release: Option<String>,
+    #[serde(default)]
+    servers: Option<Vec<ServerConfig>>,
+    #[serde(
+        rename = "connectedServerId",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    connected_server_id: Option<String>,
+    #[serde(default)]
+    accounts: Vec<SavedAccount>,
 }
 
 impl Default for LauncherConfig {
@@ -114,12 +143,70 @@ impl Default for LauncherConfig {
             install_path: None,
             ip_patch_release: default_patch_release(),
             applied_ip_patch_release: None,
+            servers: Some(vec![default_server()]),
+            connected_server_id: None,
+            accounts: Vec::new(),
         }
     }
 }
 
 fn default_patch_release() -> String {
     LATEST_PATCH_RELEASE.to_string()
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ServerConfig {
+    id: String,
+    nickname: String,
+    host: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SavedAccount {
+    server_id: String,
+    username: String,
+    password_sha1: String,
+}
+
+fn default_server() -> ServerConfig {
+    ServerConfig {
+        id: "openshores".to_string(),
+        nickname: "OpenShores".to_string(),
+        host: DEFAULT_SERVER_HOST.to_string(),
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ServerStatus {
+    login: String,
+    scene: String,
+    chat: String,
+}
+
+impl ServerStatus {
+    fn unknown() -> Self {
+        Self {
+            login: "unknown".to_string(),
+            scene: "unknown".to_string(),
+            chat: "unknown".to_string(),
+        }
+    }
+
+    fn online(&self) -> bool {
+        self.login == "online" && self.scene == "online" && self.chat == "online"
+    }
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ServerSnapshot {
+    id: String,
+    nickname: String,
+    host: String,
+    status: ServerStatus,
 }
 
 #[derive(Clone, Serialize)]
@@ -131,8 +218,12 @@ struct LauncherSnapshot {
     manifest: Option<Value>,
     busy: bool,
     game_running: bool,
+    designer_running: bool,
     ip_patch_release: String,
     applied_ip_patch_release: Option<String>,
+    servers: Vec<ServerSnapshot>,
+    connected_server_id: Option<String>,
+    account_username: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -160,7 +251,9 @@ struct OperationStatusPayload {
 }
 
 #[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct GameStatusPayload {
+    process: String,
     running: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
@@ -274,6 +367,7 @@ fn is_managed_manifest(manifest: Option<&Value>) -> bool {
 fn load_config() -> LauncherResult<LauncherConfig> {
     let path = config_path()?;
     let mut config = read_json::<LauncherConfig>(&path).unwrap_or_default();
+    let mut changed = false;
 
     if config.install_path.is_none() {
         if let Some(roaming) = env::var_os("APPDATA").map(PathBuf::from) {
@@ -284,7 +378,7 @@ fn load_config() -> LauncherResult<LauncherConfig> {
                 if let Some(found) = read_json::<LauncherConfig>(&previous) {
                     if found.install_path.is_some() {
                         config = found;
-                        write_json(&path, &config)?;
+                        changed = true;
                         break;
                     }
                 }
@@ -299,12 +393,46 @@ fn load_config() -> LauncherResult<LauncherConfig> {
             let manifest = read_json::<Value>(&saved.join(MANIFEST_FILE));
             if !is_managed_manifest(manifest.as_ref()) {
                 config.install_path = Some(default_install_path()?.to_string_lossy().into_owned());
+                changed = true;
             }
         }
     }
 
     if config.install_path.is_none() {
         config.install_path = Some(default_install_path()?.to_string_lossy().into_owned());
+        changed = true;
+    }
+    if config.servers.is_none() {
+        config.servers = Some(vec![default_server()]);
+        changed = true;
+    }
+    let server_ids: Vec<String> = config
+        .servers
+        .as_ref()
+        .into_iter()
+        .flatten()
+        .map(|server| server.id.clone())
+        .collect();
+    let account_count = config.accounts.len();
+    config.accounts.retain(|account| {
+        server_ids.iter().any(|id| id == &account.server_id)
+            && is_valid_password_sha1(&account.password_sha1)
+    });
+    if config.accounts.len() != account_count {
+        changed = true;
+    }
+    if let Some(connected) = config.connected_server_id.as_deref() {
+        let exists = config
+            .servers
+            .as_ref()
+            .is_some_and(|servers| servers.iter().any(|server| server.id == connected));
+        if !exists {
+            config.connected_server_id = None;
+            changed = true;
+        }
+    }
+    if changed || !path.is_file() {
+        write_json(&path, &config)?;
     }
     Ok(config)
 }
@@ -343,6 +471,30 @@ fn get_snapshot(state: &AppState) -> LauncherResult<LauncherSnapshot> {
     let manifest = read_json::<Value>(&install_path.join(MANIFEST_FILE));
     let installed = manifest.is_some() && install_path.join(GAME_EXE).is_file();
     let game_running = state.game_pid.lock().map_err(error_string)?.is_some();
+    let designer_running = state.designer_pid.lock().map_err(error_string)?.is_some();
+    let statuses = state.server_statuses.lock().map_err(error_string)?;
+    let servers = config
+        .servers
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|server| ServerSnapshot {
+            status: statuses
+                .get(&server.id)
+                .cloned()
+                .unwrap_or_else(ServerStatus::unknown),
+            id: server.id,
+            nickname: server.nickname,
+            host: server.host,
+        })
+        .collect();
+    let account_username = config.connected_server_id.as_deref().and_then(|server_id| {
+        config
+            .accounts
+            .iter()
+            .find(|account| account.server_id == server_id)
+            .map(|account| account.username.clone())
+    });
     Ok(LauncherSnapshot {
         launcher_version: env!("OPENSHORES_LAUNCHER_VERSION").to_string(),
         installed,
@@ -350,9 +502,18 @@ fn get_snapshot(state: &AppState) -> LauncherResult<LauncherSnapshot> {
         manifest,
         busy: state.active_operation.load(Ordering::SeqCst),
         game_running,
+        designer_running,
         ip_patch_release: config.ip_patch_release,
         applied_ip_patch_release: config.applied_ip_patch_release,
+        servers,
+        connected_server_id: config.connected_server_id,
+        account_username,
     })
+}
+
+fn any_game_process_running(state: &AppState) -> LauncherResult<bool> {
+    Ok(state.game_pid.lock().map_err(error_string)?.is_some()
+        || state.designer_pid.lock().map_err(error_string)?.is_some())
 }
 
 fn begin_operation(state: &AppState) -> LauncherResult<OperationGuard> {
@@ -396,6 +557,162 @@ fn http_client() -> LauncherResult<Client> {
         ))
         .build()
         .map_err(error_string)
+}
+
+fn account_client() -> LauncherResult<Client> {
+    Client::builder()
+        .user_agent(format!(
+            "OpenShores-Launcher/{}",
+            env!("OPENSHORES_LAUNCHER_VERSION")
+        ))
+        .cookie_store(true)
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(error_string)
+}
+
+fn normalize_server_host(value: &str) -> LauncherResult<String> {
+    let trimmed = value.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return Err("Enter a server hostname.".to_string());
+    }
+    let candidate = if trimmed.contains("://") {
+        trimmed.to_string()
+    } else {
+        format!("https://{trimmed}")
+    };
+    let parsed =
+        Url::parse(&candidate).map_err(|_| "Enter a valid server hostname.".to_string())?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("Server addresses must use HTTP or HTTPS.".to_string());
+    }
+    if parsed.path() != "/" || parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err("Server addresses cannot include a path, query, or fragment.".to_string());
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "Enter a valid server hostname.".to_string())?
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    if host.is_empty() || host.contains(' ') {
+        return Err("Enter a valid server hostname.".to_string());
+    }
+    Ok(match parsed.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host,
+    })
+}
+
+fn account_domain(host: &str) -> String {
+    let hostname = host.split(':').next().unwrap_or(host).trim_end_matches('.');
+    if hostname.parse::<std::net::IpAddr>().is_ok() || hostname.eq_ignore_ascii_case("localhost") {
+        return host.to_string();
+    }
+    List.domain(hostname.as_bytes())
+        .and_then(|domain| std::str::from_utf8(domain.as_bytes()).ok())
+        .unwrap_or(hostname)
+        .to_string()
+}
+
+fn server_api_url(host: &str, endpoint: &str) -> LauncherResult<Url> {
+    Url::parse(&format!("https://{}/api/{endpoint}", account_domain(host))).map_err(error_string)
+}
+
+fn password_sha1_hex(password: &str) -> String {
+    Sha1::digest(password.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn is_valid_password_sha1(value: &str) -> bool {
+    value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn hazeron_password_value_from_hex(password_sha1: &str) -> LauncherResult<String> {
+    if !is_valid_password_sha1(password_sha1) {
+        return Err("The saved account password hash is invalid.".to_string());
+    }
+    let bytes = (0..40)
+        .step_by(2)
+        .map(|index| {
+            u8::from_str_radix(&password_sha1[index..index + 2], 16)
+                .map_err(|_| "The saved account password hash is invalid.".to_string())
+        })
+        .collect::<LauncherResult<Vec<_>>>()?;
+    let payload: String = bytes.into_iter().map(char::from).collect();
+    Ok(format!("@ByteArray({payload})"))
+}
+
+fn response_error(response: Response, fallback: &str) -> String {
+    let status = response.status();
+    response
+        .json::<Value>()
+        .ok()
+        .and_then(|value| {
+            value
+                .get("detail")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| format!("{fallback} ({status})."))
+}
+
+fn server_by_id(config: &LauncherConfig, id: &str) -> LauncherResult<ServerConfig> {
+    config
+        .servers
+        .as_ref()
+        .and_then(|servers| servers.iter().find(|server| server.id == id))
+        .cloned()
+        .ok_or_else(|| "That server no longer exists.".to_string())
+}
+
+fn connected_server(config: &LauncherConfig) -> LauncherResult<ServerConfig> {
+    let id = config
+        .connected_server_id
+        .as_deref()
+        .ok_or_else(|| "Connect to a server first.".to_string())?;
+    server_by_id(config, id)
+}
+
+fn fetch_server_status(client: &Client, server: &ServerConfig) -> ServerStatus {
+    let Ok(url) = server_api_url(&server.host, "status") else {
+        return ServerStatus::unknown();
+    };
+    client
+        .get(url)
+        .header("Cache-Control", "no-store")
+        .send()
+        .ok()
+        .filter(|response| response.status().is_success())
+        .and_then(|response| response.json::<ServerStatus>().ok())
+        .unwrap_or_else(ServerStatus::unknown)
+}
+
+#[cfg(windows)]
+fn write_game_account_registry(host: &str, account: Option<&SavedAccount>) -> LauncherResult<bool> {
+    let users = RegKey::predef(HKEY_USERS);
+    let (key, _) = users
+        .create_subkey(ACCOUNT_REGISTRY_PATH)
+        .map_err(error_string)?;
+    key.set_value("Host", &host).map_err(error_string)?;
+    if let Some(account) = account {
+        let password = hazeron_password_value_from_hex(&account.password_sha1)?;
+        key.set_value("Name", &account.username)
+            .map_err(error_string)?;
+        key.set_value("Password", &password).map_err(error_string)?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+#[cfg(not(windows))]
+fn write_game_account_registry(
+    _host: &str,
+    account: Option<&SavedAccount>,
+) -> LauncherResult<bool> {
+    Ok(account.is_some())
 }
 
 fn format_bytes(bytes: u64) -> String {
@@ -1106,7 +1423,7 @@ fn update_ip_patch_sync(
     state: &AppState,
     force: bool,
 ) -> LauncherResult<LauncherSnapshot> {
-    if state.game_pid.lock().map_err(error_string)?.is_some() {
+    if any_game_process_running(state)? {
         return Err("Close OpenShores before updating the IP patch.".to_string());
     }
     let config = load_config()?;
@@ -1121,7 +1438,7 @@ fn update_ip_patch_sync(
         return get_snapshot(state);
     }
     let guard = begin_operation(state)?;
-    if state.game_pid.lock().map_err(error_string)?.is_some() {
+    if any_game_process_running(state)? {
         return Err("Close OpenShores before updating the IP patch.".to_string());
     }
     emit_operation_status(app, true, None);
@@ -1275,7 +1592,7 @@ fn install_game_sync(
 }
 
 fn uninstall_game_sync(app: &AppHandle, state: &AppState) -> LauncherResult<LauncherSnapshot> {
-    if state.game_pid.lock().map_err(error_string)?.is_some() {
+    if any_game_process_running(state)? {
         return Err("Close OpenShores before uninstalling it.".to_string());
     }
     let config = load_config()?;
@@ -1316,38 +1633,65 @@ fn uninstall_game_sync(app: &AppHandle, state: &AppState) -> LauncherResult<Laun
     get_snapshot(state)
 }
 
-fn launch_game_sync(app: &AppHandle, state: &AppState) -> LauncherResult<LauncherSnapshot> {
-    let _guard = begin_operation(state)?;
+fn launch_game_sync(
+    app: &AppHandle,
+    state: &AppState,
+    offline_designer: bool,
+) -> LauncherResult<LauncherSnapshot> {
     let config = load_config()?;
-    let install_path = PathBuf::from(config.install_path.unwrap());
+    let install_path = PathBuf::from(config.install_path.clone().unwrap());
     let executable = install_path.join(GAME_EXE);
     if !executable.is_file() {
         return Err("OpenShores is not installed.".to_string());
     }
+    let process_name = if offline_designer { "designer" } else { "game" };
+    let process_pid = if offline_designer {
+        state.designer_pid.clone()
+    } else {
+        state.game_pid.clone()
+    };
     {
-        let mut pid = state.game_pid.lock().map_err(error_string)?;
+        let mut pid = process_pid.lock().map_err(error_string)?;
         if pid.is_some() {
             return get_snapshot(state);
         }
-        let mut child = Command::new(&executable)
+        let mut command = Command::new(&executable);
+        if offline_designer {
+            command.arg("-designer");
+        } else if let Some(server_id) = config.connected_server_id.as_deref() {
+            let server = server_by_id(&config, server_id)?;
+            let active_account = config
+                .accounts
+                .iter()
+                .find(|account| account.server_id == server.id);
+            if write_game_account_registry(&server.host, active_account)? {
+                command.arg("-launcher");
+            }
+        }
+        let mut child = command
             .current_dir(&install_path)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
             .map_err(error_string)?;
-        *pid = Some(child.id());
-        let game_pid = state.game_pid.clone();
+        let child_pid = child.id();
+        *pid = Some(child_pid);
+        let tracked_pid = process_pid.clone();
+        let tracked_process = process_name.to_string();
         let app_handle = app.clone();
         thread::spawn(move || {
             let result = child.wait();
-            if let Ok(mut current) = game_pid.lock() {
-                *current = None;
+            if let Ok(mut current) = tracked_pid.lock() {
+                if *current == Some(child_pid) {
+                    *current = None;
+                }
             }
             let error = result.err().map(|value| value.to_string());
             let _ = app_handle.emit(
                 "game-status",
                 GameStatusPayload {
+                    process: tracked_process,
                     running: false,
                     error,
                 },
@@ -1357,6 +1701,7 @@ fn launch_game_sync(app: &AppHandle, state: &AppState) -> LauncherResult<Launche
     let _ = app.emit(
         "game-status",
         GameStatusPayload {
+            process: process_name.to_string(),
             running: true,
             error: None,
         },
@@ -1571,24 +1916,179 @@ fn batch_escape(value: &Path) -> String {
     value.to_string_lossy().replace('%', "%%").replace('"', "")
 }
 
+fn directory_file_bytes(path: &Path) -> LauncherResult<u64> {
+    let mut total = 0u64;
+    for entry in fs::read_dir(path).map_err(error_string)? {
+        let entry = entry.map_err(error_string)?;
+        let file_type = entry.file_type().map_err(error_string)?;
+        if file_type.is_symlink() {
+            return Err(
+                "The installation contains a symbolic link and cannot be moved safely.".to_string(),
+            );
+        }
+        if file_type.is_dir() {
+            total = total.saturating_add(directory_file_bytes(&entry.path())?);
+        } else if file_type.is_file() {
+            total = total.saturating_add(entry.metadata().map_err(error_string)?.len());
+        }
+    }
+    Ok(total)
+}
+
+fn copy_installation_tree(
+    app: &AppHandle,
+    source: &Path,
+    destination: &Path,
+    total_bytes: u64,
+    copied_bytes: &mut u64,
+) -> LauncherResult<()> {
+    fs::create_dir_all(destination).map_err(error_string)?;
+    for entry in fs::read_dir(source).map_err(error_string)? {
+        let entry = entry.map_err(error_string)?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let file_type = entry.file_type().map_err(error_string)?;
+        if file_type.is_symlink() {
+            return Err(
+                "The installation contains a symbolic link and cannot be moved safely.".to_string(),
+            );
+        }
+        if file_type.is_dir() {
+            copy_installation_tree(
+                app,
+                &source_path,
+                &destination_path,
+                total_bytes,
+                copied_bytes,
+            )?;
+        } else if file_type.is_file() {
+            let bytes = fs::copy(&source_path, &destination_path).map_err(error_string)?;
+            *copied_bytes = copied_bytes.saturating_add(bytes);
+            let percent = if total_bytes == 0 {
+                90.0
+            } else {
+                8.0 + (*copied_bytes as f64 / total_bytes as f64) * 82.0
+            };
+            emit_progress(
+                app,
+                "Moving OpenShores",
+                percent,
+                format!("Copying {}", entry.file_name().to_string_lossy()),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn move_installation_sync(
+    app: &AppHandle,
+    state: &AppState,
+    source: PathBuf,
+    destination: PathBuf,
+) -> LauncherResult<LauncherSnapshot> {
+    if any_game_process_running(state)? {
+        return Err("Close OpenShores before moving the installation.".to_string());
+    }
+    let source = source.canonicalize().map_err(error_string)?;
+    let destination = destination.canonicalize().map_err(error_string)?;
+    if path_eq(&source, &destination) {
+        return get_snapshot(state);
+    }
+    if destination.starts_with(&source) {
+        return Err("Choose a folder outside the current installation.".to_string());
+    }
+    if fs::read_dir(&destination)
+        .map_err(error_string)?
+        .next()
+        .is_some()
+    {
+        return Err("Choose an empty destination folder.".to_string());
+    }
+    if !is_managed_manifest(read_json::<Value>(&source.join(MANIFEST_FILE)).as_ref()) {
+        return Err("The current installation is not managed by this launcher.".to_string());
+    }
+
+    let _guard = begin_operation(state)?;
+    emit_progress(
+        app,
+        "Moving OpenShores",
+        4.0,
+        format!("Preparing {}", destination.display()),
+    );
+
+    fs::remove_dir(&destination).map_err(error_string)?;
+    if fs::rename(&source, &destination).is_ok() {
+        save_install_path(&destination)?;
+        emit_progress(
+            app,
+            "OpenShores moved",
+            100.0,
+            format!("Installation moved to {}", destination.display()),
+        );
+        return get_snapshot(state);
+    }
+
+    fs::create_dir_all(&destination).map_err(error_string)?;
+    let total_bytes = directory_file_bytes(&source)?;
+    let mut copied_bytes = 0u64;
+    copy_installation_tree(app, &source, &destination, total_bytes, &mut copied_bytes)?;
+    if !destination.join(GAME_EXE).is_file()
+        || !is_managed_manifest(read_json::<Value>(&destination.join(MANIFEST_FILE)).as_ref())
+    {
+        return Err(
+            "The copied installation could not be verified; the original was preserved."
+                .to_string(),
+        );
+    }
+    emit_progress(
+        app,
+        "Moving OpenShores",
+        94.0,
+        "Removing the original installation...",
+    );
+    save_install_path(&destination)?;
+    fs::remove_dir_all(&source).map_err(error_string)?;
+    emit_progress(
+        app,
+        "OpenShores moved",
+        100.0,
+        format!("Installation moved to {}", destination.display()),
+    );
+    get_snapshot(state)
+}
+
 #[tauri::command]
 fn get_state(state: State<'_, AppState>) -> LauncherResult<LauncherSnapshot> {
     get_snapshot(state.inner())
 }
 
 #[tauri::command]
-async fn choose_folder(state: State<'_, AppState>) -> LauncherResult<Option<LauncherSnapshot>> {
+async fn choose_folder(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> LauncherResult<Option<LauncherSnapshot>> {
     let backend = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let current = load_config()?.install_path.unwrap();
+        let config = load_config()?;
+        let current = PathBuf::from(config.install_path.unwrap());
+        let installed = current.join(GAME_EXE).is_file()
+            && is_managed_manifest(read_json::<Value>(&current.join(MANIFEST_FILE)).as_ref());
         let selected = rfd::FileDialog::new()
-            .set_title("Choose OpenShores install folder")
-            .set_directory(current)
+            .set_title(if installed {
+                "Move OpenShores installation"
+            } else {
+                "Choose OpenShores install folder"
+            })
+            .set_directory(current.parent().unwrap_or(&current))
             .pick_folder();
         match selected {
             Some(path) => {
-                save_install_path(&path)?;
-                get_snapshot(&backend).map(Some)
+                if installed {
+                    move_installation_sync(&app, &backend, current, path).map(Some)
+                } else {
+                    save_install_path(&path)?;
+                    get_snapshot(&backend).map(Some)
+                }
             }
             None => Ok(None),
         }
@@ -1655,8 +2155,360 @@ async fn uninstall_game(
 }
 
 #[tauri::command]
+fn add_server(
+    nickname: String,
+    host: String,
+    state: State<'_, AppState>,
+) -> LauncherResult<LauncherSnapshot> {
+    let host = normalize_server_host(&host)?;
+    let mut config = load_config()?;
+    let servers = config.servers.get_or_insert_with(Vec::new);
+    if servers
+        .iter()
+        .any(|server| server.host.eq_ignore_ascii_case(&host))
+    {
+        return Err("That server is already in your list.".to_string());
+    }
+    let nickname = if nickname.trim().is_empty() {
+        host.clone()
+    } else {
+        nickname.trim().to_string()
+    };
+    let id = format!(
+        "server-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(error_string)?
+            .as_nanos()
+    );
+    servers.push(ServerConfig { id, nickname, host });
+    write_json(&config_path()?, &config)?;
+    get_snapshot(state.inner())
+}
+
+#[tauri::command]
+fn edit_server(
+    server_id: String,
+    nickname: String,
+    host: String,
+    state: State<'_, AppState>,
+) -> LauncherResult<LauncherSnapshot> {
+    let host = normalize_server_host(&host)?;
+    let mut config = load_config()?;
+    let servers = config.servers.get_or_insert_with(Vec::new);
+    if servers
+        .iter()
+        .any(|server| server.id != server_id && server.host.eq_ignore_ascii_case(&host))
+    {
+        return Err("That server is already in your list.".to_string());
+    }
+    let server = servers
+        .iter_mut()
+        .find(|server| server.id == server_id)
+        .ok_or_else(|| "That server no longer exists.".to_string())?;
+    let host_changed = !server.host.eq_ignore_ascii_case(&host);
+    server.nickname = if nickname.trim().is_empty() {
+        host.clone()
+    } else {
+        nickname.trim().to_string()
+    };
+    server.host = host;
+    if host_changed {
+        config
+            .accounts
+            .retain(|account| account.server_id != server_id);
+        state
+            .account_clients
+            .lock()
+            .map_err(error_string)?
+            .remove(&server_id);
+    }
+    write_json(&config_path()?, &config)?;
+    state
+        .server_statuses
+        .lock()
+        .map_err(error_string)?
+        .remove(&server_id);
+    get_snapshot(state.inner())
+}
+
+#[tauri::command]
+fn remove_server(
+    server_id: String,
+    state: State<'_, AppState>,
+) -> LauncherResult<LauncherSnapshot> {
+    let mut config = load_config()?;
+    let servers = config.servers.get_or_insert_with(Vec::new);
+    let original_len = servers.len();
+    servers.retain(|server| server.id != server_id);
+    if servers.len() == original_len {
+        return Err("That server no longer exists.".to_string());
+    }
+    if config.connected_server_id.as_deref() == Some(server_id.as_str()) {
+        config.connected_server_id = None;
+    }
+    config
+        .accounts
+        .retain(|account| account.server_id != server_id);
+    state
+        .account_clients
+        .lock()
+        .map_err(error_string)?
+        .remove(&server_id);
+    state
+        .server_statuses
+        .lock()
+        .map_err(error_string)?
+        .remove(&server_id);
+    write_json(&config_path()?, &config)?;
+    get_snapshot(state.inner())
+}
+
+#[tauri::command]
+async fn connect_server(
+    server_id: Option<String>,
+    state: State<'_, AppState>,
+) -> LauncherResult<LauncherSnapshot> {
+    let backend = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut config = load_config()?;
+        if let Some(id) = server_id.as_deref() {
+            let server = server_by_id(&config, id)?;
+            let client = Client::builder()
+                .user_agent(format!(
+                    "OpenShores-Launcher/{}",
+                    env!("OPENSHORES_LAUNCHER_VERSION")
+                ))
+                .timeout(Duration::from_secs(5))
+                .build()
+                .map_err(error_string)?;
+            let status = fetch_server_status(&client, &server);
+            backend
+                .server_statuses
+                .lock()
+                .map_err(error_string)?
+                .insert(server.id, status.clone());
+            if !status.online() {
+                return Err(
+                    "This server is unavailable or offline. Refresh its status and try again."
+                        .to_string(),
+                );
+            }
+        }
+        config.connected_server_id = server_id;
+        write_json(&config_path()?, &config)?;
+        get_snapshot(&backend)
+    })
+    .await
+    .map_err(error_string)?
+}
+
+#[tauri::command]
+async fn refresh_server_statuses(state: State<'_, AppState>) -> LauncherResult<LauncherSnapshot> {
+    let backend = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let servers = load_config()?.servers.unwrap_or_default();
+        let client = Client::builder()
+            .user_agent(format!(
+                "OpenShores-Launcher/{}",
+                env!("OPENSHORES_LAUNCHER_VERSION")
+            ))
+            .timeout(Duration::from_secs(5))
+            .build()
+            .map_err(error_string)?;
+        let handles: Vec<_> = servers
+            .into_iter()
+            .map(|server| {
+                let client = client.clone();
+                thread::spawn(move || {
+                    let status = fetch_server_status(&client, &server);
+                    (server.id, status)
+                })
+            })
+            .collect();
+        let mut statuses = backend.server_statuses.lock().map_err(error_string)?;
+        for handle in handles {
+            let (id, status) = handle
+                .join()
+                .map_err(|_| "A server status check failed.".to_string())?;
+            statuses.insert(id, status);
+        }
+        drop(statuses);
+        get_snapshot(&backend)
+    })
+    .await
+    .map_err(error_string)?
+}
+
+fn authenticate_account(
+    state: &AppState,
+    endpoint: &str,
+    username: String,
+    password: String,
+) -> LauncherResult<LauncherSnapshot> {
+    let mut config = load_config()?;
+    let server = connected_server(&config)?;
+    let client = account_client()?;
+    let response = client
+        .post(server_api_url(&server.host, endpoint)?)
+        .json(&json!({ "username": username.trim(), "password": password }))
+        .send()
+        .map_err(|_| "Could not reach the account server.".to_string())?;
+    if !response.status().is_success() {
+        return Err(response_error(
+            response,
+            if endpoint == "register" {
+                "Registration failed"
+            } else {
+                "Login failed"
+            },
+        ));
+    }
+    let canonical_username = response
+        .json::<Value>()
+        .ok()
+        .and_then(|value| {
+            value
+                .get("username")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| username.trim().to_string());
+    let saved_account = SavedAccount {
+        server_id: server.id.clone(),
+        username: canonical_username,
+        password_sha1: password_sha1_hex(&password),
+    };
+    config
+        .accounts
+        .retain(|account| account.server_id != server.id);
+    config.accounts.push(saved_account);
+    write_json(&config_path()?, &config)?;
+    state
+        .account_clients
+        .lock()
+        .map_err(error_string)?
+        .insert(server.id, client);
+    get_snapshot(state)
+}
+
+#[tauri::command]
+async fn login_account(
+    username: String,
+    password: String,
+    state: State<'_, AppState>,
+) -> LauncherResult<LauncherSnapshot> {
+    if username.trim().is_empty() || password.is_empty() {
+        return Err("Enter your username and password.".to_string());
+    }
+    let backend = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        authenticate_account(&backend, "login", username, password)
+    })
+    .await
+    .map_err(error_string)?
+}
+
+#[tauri::command]
+async fn register_account(
+    username: String,
+    password: String,
+    state: State<'_, AppState>,
+) -> LauncherResult<LauncherSnapshot> {
+    if username.trim().is_empty() || password.is_empty() {
+        return Err("Enter a username and password.".to_string());
+    }
+    let backend = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        authenticate_account(&backend, "register", username, password)
+    })
+    .await
+    .map_err(error_string)?
+}
+
+#[tauri::command]
+async fn logout_account(state: State<'_, AppState>) -> LauncherResult<LauncherSnapshot> {
+    let backend = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut config = load_config()?;
+        if let Ok(server) = connected_server(&config) {
+            let client = backend
+                .account_clients
+                .lock()
+                .map_err(error_string)?
+                .remove(&server.id);
+            if let Some(client) = client {
+                if let Ok(url) = server_api_url(&server.host, "logout") {
+                    let _ = client.post(url).send();
+                }
+            }
+            config
+                .accounts
+                .retain(|account| account.server_id != server.id);
+            write_json(&config_path()?, &config)?;
+        }
+        get_snapshot(&backend)
+    })
+    .await
+    .map_err(error_string)?
+}
+
+#[tauri::command]
 fn launch_game(app: AppHandle, state: State<'_, AppState>) -> LauncherResult<LauncherSnapshot> {
-    launch_game_sync(&app, state.inner())
+    launch_game_sync(&app, state.inner(), false)
+}
+
+#[tauri::command]
+fn launch_offline_designer(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> LauncherResult<LauncherSnapshot> {
+    launch_game_sync(&app, state.inner(), true)
+}
+
+#[tauri::command]
+fn stop_game_process(
+    process: String,
+    state: State<'_, AppState>,
+) -> LauncherResult<LauncherSnapshot> {
+    let tracked_pid = match process.as_str() {
+        "game" => state.game_pid.clone(),
+        "designer" => state.designer_pid.clone(),
+        _ => return Err("Unknown game process.".to_string()),
+    };
+    let pid = *tracked_pid.lock().map_err(error_string)?;
+    let Some(pid) = pid else {
+        return get_snapshot(state.inner());
+    };
+
+    #[cfg(windows)]
+    let status = Command::new("taskkill.exe")
+        .args(["/PID", &pid.to_string(), "/F"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(error_string)?;
+
+    #[cfg(not(windows))]
+    let status = Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(error_string)?;
+
+    if !status.success() {
+        return Err("The running process could not be stopped.".to_string());
+    }
+    if let Ok(mut current) = tracked_pid.lock() {
+        if *current == Some(pid) {
+            *current = None;
+        }
+    }
+    get_snapshot(state.inner())
 }
 
 #[tauri::command]
@@ -1817,7 +2669,17 @@ fn main() {
             set_ip_patch_release,
             update_ip_patch,
             uninstall_game,
+            add_server,
+            edit_server,
+            remove_server,
+            connect_server,
+            refresh_server_statuses,
+            login_account,
+            register_account,
+            logout_account,
             launch_game,
+            launch_offline_designer,
+            stop_game_process,
             open_folder,
             open_link,
             check_updates,
@@ -1840,11 +2702,11 @@ fn main() {
                     .center()
                     .decorations(false)
                     .transparent(false)
-                    .shadow(false)
+                    .shadow(true)
                     .data_directory(webview_data)
                     .build()?;
             #[cfg(windows)]
-            hide_native_window_border(&window);
+            apply_native_window_frame(&window);
             let app_handle = app.handle().clone();
             let backend = app.state::<AppState>().inner().clone();
             thread::spawn(move || {
@@ -1983,6 +2845,7 @@ mod tests {
             serde_json::from_str(r#"{"installPath":"C:\\OpenShores"}"#).unwrap();
         assert_eq!(config.ip_patch_release, LATEST_PATCH_RELEASE);
         assert_eq!(config.applied_ip_patch_release, None);
+        assert_eq!(config.servers, None);
 
         let saved = LauncherConfig {
             applied_ip_patch_release: Some("r4".to_string()),
@@ -1990,6 +2853,94 @@ mod tests {
         };
         let json = serde_json::to_value(saved).unwrap();
         assert_eq!(json["appliedIpPatchRelease"], "r4");
+    }
+
+    #[test]
+    fn empty_server_lists_are_distinct_from_uninitialized_configs() {
+        let config: LauncherConfig = serde_json::from_str(r#"{"servers":[]}"#).unwrap();
+        assert_eq!(config.servers, Some(Vec::new()));
+    }
+
+    #[test]
+    fn account_endpoints_drop_the_play_subdomain() {
+        assert_eq!(account_domain("play.openshores.net"), "openshores.net");
+        assert_eq!(account_domain("play.example.co.uk"), "example.co.uk");
+        assert_eq!(
+            server_api_url("play.openshores.net", "login")
+                .unwrap()
+                .as_str(),
+            "https://openshores.net/api/login"
+        );
+    }
+
+    #[test]
+    fn hazeron_password_uses_raw_sha1_bytes_in_qt_byte_array_format() {
+        let stored_hash = password_sha1_hex("password");
+        assert_eq!(stored_hash, "5baa61e4c9b93f3f0682250b6cf8331b7ee68fd8");
+        let value = hazeron_password_value_from_hex(&stored_hash).unwrap();
+        assert_eq!(value.chars().count(), 32);
+        let payload_hex: String = value
+            .chars()
+            .skip(11)
+            .take(20)
+            .map(|character| format!("{:02x}", character as u32))
+            .collect();
+        assert_eq!(payload_hex, "5baa61e4c9b93f3f0682250b6cf8331b7ee68fd8");
+    }
+
+    #[test]
+    fn saved_accounts_store_only_the_compatible_sha1_digest() {
+        let account = SavedAccount {
+            server_id: "openshores".to_string(),
+            username: "Explorer".to_string(),
+            password_sha1: password_sha1_hex("secret"),
+        };
+        let json = serde_json::to_string(&account).unwrap();
+        assert!(json.contains("e5e9fa1ba31ecd1ae84f75caaa474f3a663f05f4"));
+        assert!(!json.contains("secret"));
+    }
+
+    #[test]
+    fn multiple_servers_keep_independent_saved_accounts() {
+        let mut config = LauncherConfig::default();
+        config.accounts = vec![
+            SavedAccount {
+                server_id: "openshores".to_string(),
+                username: "Explorer".to_string(),
+                password_sha1: password_sha1_hex("first"),
+            },
+            SavedAccount {
+                server_id: "community".to_string(),
+                username: "Builder".to_string(),
+                password_sha1: password_sha1_hex("second"),
+            },
+        ];
+        let username_for = |server_id: &str| {
+            config
+                .accounts
+                .iter()
+                .find(|account| account.server_id == server_id)
+                .map(|account| account.username.as_str())
+        };
+        assert_eq!(username_for("openshores"), Some("Explorer"));
+        assert_eq!(username_for("community"), Some("Builder"));
+    }
+
+    #[test]
+    fn installation_size_walk_includes_nested_files() {
+        let root = env::temp_dir().join(format!(
+            "openshores-move-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let nested = root.join("nested");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(root.join("one.bin"), [0u8; 3]).unwrap();
+        fs::write(nested.join("two.bin"), [0u8; 7]).unwrap();
+        assert_eq!(directory_file_bytes(&root).unwrap(), 10);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

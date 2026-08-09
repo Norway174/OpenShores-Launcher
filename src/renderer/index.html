@@ -28,9 +28,13 @@
       <div class="workspace">
         <nav id="section-nav" class="section-nav hidden" aria-label="Launcher sections">
           <button class="nav-item active" data-view="home">Overview</button>
+          <button class="nav-item" data-view="servers">Servers</button>
+          <span id="account-tab-wrap" class="nav-tooltip" data-tooltip="Connect to a server first">
+            <button id="account-tab" class="nav-item" data-view="account" disabled>Account</button>
+          </span>
           <button class="nav-item" data-view="settings">Settings</button>
           <span class="nav-spacer"></span>
-          <span class="service-state"><i></i>ONLINE</span>
+          <span id="service-state" class="service-state offline"><i></i><span>OFFLINE</span></span>
           <span class="version">v...</span>
         </nav>
 
@@ -60,15 +64,52 @@
               </div>
               <div id="actions" class="actions hidden">
                 <button id="primary-action" class="primary" disabled>Loading…</button>
-                <button id="open-folder" class="secondary hidden">Open folder</button>
+                <button id="offline-designer" class="secondary" disabled>Open Offline Designer</button>
               </div>
             </div>
 
             <aside class="quick-info">
-              <div><span>GAME SOURCE</span><strong>openshores.net</strong></div>
+              <div><span>GAME SOURCE</span><strong id="game-source">No server selected</strong></div>
               <div><span>PATCH CHANNEL</span><strong id="patch-channel">Latest Release</strong></div>
               <div><span>INSTALL MODE</span><strong>Managed & verified</strong></div>
             </aside>
+          </div>
+        </section>
+
+        <section id="servers-view" class="view servers-view">
+          <div class="view-header">
+            <div><span class="kicker">MULTIPLAYER</span><h1>Servers</h1><p>Add community servers and choose where OpenShores connects.</p></div>
+            <div class="view-header-actions"><button id="refresh-servers" class="secondary compact">Refresh</button><button id="add-server" class="primary compact">Add server</button></div>
+          </div>
+          <div id="server-error" class="error-box hidden"></div>
+          <div id="server-list" class="server-list"></div>
+          <div id="server-empty" class="empty-state hidden"><strong>No servers configured</strong><p>Add a server whenever you're ready. Deleted defaults stay deleted.</p></div>
+        </section>
+
+        <section id="account-view" class="view account-view">
+          <div class="view-header">
+            <div><span class="kicker">CONNECTED ACCOUNT</span><h1 id="account-heading">Account</h1><p id="account-server-copy">Connect to a server to continue.</p></div>
+          </div>
+          <div id="account-logged-out" class="account-card">
+            <div class="account-intro"><strong id="account-login-title">Login</strong><p id="account-login-address">—</p></div>
+            <label for="account-username">Username</label>
+            <input id="account-username" type="text" maxlength="32" autocomplete="username">
+            <label for="account-password">Password</label>
+            <input id="account-password" type="password" maxlength="256" autocomplete="current-password">
+            <label id="confirm-password-label" class="hidden" for="account-password-confirm">Confirm password</label>
+            <input id="account-password-confirm" class="hidden" type="password" maxlength="256" autocomplete="new-password">
+            <div class="account-actions">
+              <button id="login-account" class="primary">Log in</button>
+              <button id="register-account" class="secondary">Register</button>
+              <button id="cancel-register" class="secondary hidden">Cancel</button>
+            </div>
+            <div id="account-error" class="error-box hidden"></div>
+          </div>
+          <div id="account-logged-in" class="account-card account-session hidden">
+            <span class="status-pill online"><i></i>LOGGED IN</span>
+            <h2 id="account-name"></h2>
+            <p>Your game account will be applied automatically when OpenShores launches.</p>
+            <button id="logout-account" class="secondary">Log out</button>
           </div>
         </section>
 
@@ -79,7 +120,7 @@
             <div class="settings-list">
               <div class="path-setting">
                 <label>Game installation folder</label>
-                <div class="path-row"><div id="install-path" class="path-value">—</div><button id="choose-folder" class="secondary">Browse…</button></div>
+                <div class="path-row"><div id="install-path" class="path-value">—</div><button id="open-folder" class="secondary" disabled>Open folder</button><button id="choose-folder" class="secondary">Browse…</button></div>
               </div>
               <div class="setting-row"><div><strong>IP patch release</strong><p>Use the newest release automatically, or pin a specific release.</p></div><div class="setting-control"><select id="patch-release" aria-label="IP patch release"><option value="latest">Latest Release</option></select><button id="update-patch" class="secondary">Update patch</button></div></div>
               <div class="setting-row"><div><strong>Refresh game files</strong><p>Verify clean source files, download changes, and reapply the selected IP patch.</p></div><button id="refresh-game" class="secondary">Update game</button></div>
@@ -98,6 +139,22 @@
     </main>
   </div>
 
+  <div id="server-modal" class="modal-backdrop hidden">
+    <section class="server-dialog" role="dialog" aria-modal="true" aria-labelledby="server-dialog-title">
+      <button id="dismiss-server-modal" class="dialog-close" aria-label="Close server editor" title="Close">&times;</button>
+      <span class="kicker">SERVER DIRECTORY</span>
+      <h2 id="server-dialog-title">Add server</h2>
+      <input id="server-edit-id" type="hidden">
+      <label for="server-nickname">Nickname</label>
+      <input id="server-nickname" type="text" maxlength="48" placeholder="My server">
+      <label for="server-host">Server address</label>
+      <input id="server-host" type="text" maxlength="255" placeholder="play.example.net">
+      <p class="field-help">Enter a hostname without a path. Account requests use its base domain.</p>
+      <div id="server-modal-error" class="error-box hidden"></div>
+      <div class="dialog-actions"><button id="cancel-server-modal" class="secondary">Cancel</button><button id="save-server" class="primary">Save server</button></div>
+    </section>
+  </div>
+
   <div id="update-modal" class="modal-backdrop hidden">
     <section class="update-dialog" role="dialog" aria-modal="true" aria-labelledby="update-dialog-title" aria-describedby="update-message">
       <button id="dismiss-update" class="dialog-close" aria-label="Close update notification" title="Close">&times;</button>
@@ -110,6 +167,21 @@
       <div class="update-dialog-actions">
         <button id="update-later" class="secondary">Later</button>
         <button id="install-update" class="primary">Download &amp; restart</button>
+      </div>
+    </section>
+  </div>
+
+  <div id="stop-process-modal" class="modal-backdrop hidden">
+    <section class="update-dialog stop-dialog" role="dialog" aria-modal="true" aria-labelledby="stop-dialog-title" aria-describedby="stop-dialog-message">
+      <div class="update-icon warning-icon" aria-hidden="true"><span>!</span></div>
+      <div class="update-dialog-copy">
+        <span class="kicker">RUNNING PROCESS</span>
+        <h2 id="stop-dialog-title">Stop <span id="stop-process-name">OpenShores</span>?</h2>
+        <p id="stop-dialog-message">Closing a running process may have unintended consequences. Are you sure?</p>
+      </div>
+      <div class="update-dialog-actions">
+        <button id="cancel-stop-process" class="secondary">No</button>
+        <button id="confirm-stop-process" class="danger">Yes</button>
       </div>
     </section>
   </div>
