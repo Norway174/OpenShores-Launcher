@@ -18,23 +18,10 @@ html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background:
 body { padding: 0; color: var(--text); font-family: Inter, "Segoe UI", Arial, sans-serif; font-size: 13px; user-select: none; }
 button { color: inherit; font: inherit; }
 .window-frame { width: 100%; height: 100%; overflow: hidden; background: var(--window); }
-.titlebar { height: 40px; display: flex; align-items: center; justify-content: space-between; overflow: hidden; background: var(--header); -webkit-app-region: drag; }
-.titlebar-brand { min-width: 0; height: 100%; flex: 1; display: flex; align-items: center; gap: 10px; padding: 4px 10px; }
-.titlebar-brand img { width: 30px; height: 30px; flex: 0 0 30px; object-fit: cover; border-radius: 50%; }
-.titlebar-brand span { overflow: hidden; color: #fff; font-family: "Arial Narrow", "Roboto Condensed", Arial, sans-serif; font-size: 24px; font-stretch: condensed; font-weight: 400; letter-spacing: 3.84px; line-height: 1; white-space: nowrap; }
-.window-controls { width: auto; height: 100%; display: flex; align-items: flex-start; justify-content: flex-end; -webkit-app-region: no-drag; }
-.window-controls button { position: relative; width: 46px; height: 40px; border: 0; background: transparent; cursor: default; }
-.window-controls button:hover { background: rgba(255, 255, 255, .08); }
-.window-controls button:active { background: rgba(255, 255, 255, .12); }
-.window-controls .minimize::before { position: absolute; top: 20px; left: 18px; width: 10px; height: 1px; content: ""; background: #fff; }
-.window-controls .close::before, .window-controls .close::after { position: absolute; top: 19px; left: 17px; width: 12px; height: 1px; content: ""; background: #fff; }
-.window-controls .close::before { transform: rotate(45deg); }
-.window-controls .close::after { transform: rotate(-45deg); }
-.window-controls .close:hover { background: #c42b1c; }
-.window-controls .close:active { background: #a92317; }
-main { height: calc(100% - 40px); overflow: hidden; }
-.space-banner { width: 100%; height: 170px; overflow: hidden; background: #030803; }
-.space-banner img { width: 100%; height: 100%; display: block; object-fit: cover; pointer-events: none; }
+main { height: 100%; overflow: hidden; }
+.space-banner { position: relative; width: 100%; height: 170px; overflow: hidden; background: #030803; }
+.banner-art { width: 100%; height: 100%; display: block; object-fit: cover; pointer-events: none; }
+.banner-logo { position: absolute; top: 14px; left: 22px; width: 142px; height: 142px; display: block; object-fit: contain; filter: drop-shadow(0 5px 14px rgba(0, 0, 0, .6)); pointer-events: none; }
 .workspace { height: calc(100% - 170px); display: flex; flex-direction: column; overflow: hidden; }
 .section-nav { height: 42px; flex: 0 0 42px; display: flex; align-items: stretch; padding: 0 20px; border-bottom: 1px solid var(--line); background: rgba(0, 0, 0, .08); }
 .nav-item { position: relative; min-width: 76px; padding: 0 11px; border: 0; color: #969696; background: transparent; cursor: pointer; font-size: 12px; }
@@ -135,8 +122,9 @@ h1 { margin: 4px 0 0; font-family: "Arial Narrow", "Segoe UI", sans-serif; font-
 .setting-control select { width: 190px; height: 34px; padding: 0 28px 0 10px; border: 1px solid #555; border-radius: 2px; color: #ddd; background: #292929; font: inherit; font-size: 10px; }
 .setting-control select:focus { border-color: #5c9ab8; outline: none; }
 .setting-control select:disabled { opacity: .45; }
-.links { display: flex; gap: 18px; margin-top: 9px; }
+.links { display: flex; align-items: center; gap: 18px; margin-top: 9px; }
 .links button { padding: 0; font-size: 9px; }
+.creator-credit { margin-left: auto; color: #737373; font-size: 9px; }
 .view-header { display: flex; align-items: flex-end; justify-content: space-between; gap: 18px; margin-bottom: 14px; }
 .view-header p { margin: 5px 0 0; color: #898989; font-size: 9px; }
 .view-header-actions { display: flex; gap: 8px; }
@@ -187,7 +175,6 @@ h1 { margin: 4px 0 0; font-family: "Arial Narrow", "Segoe UI", sans-serif; font-
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
 .hidden { display: none !important; }
 @media (max-width: 740px) {
-  .titlebar-brand span { font-size: 20px; letter-spacing: 2.8px; }
   .overview-grid { grid-template-columns: 1fr; }
   .quick-info { display: none; }
   .section-nav { padding: 0 10px; }

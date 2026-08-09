@@ -25,7 +25,7 @@ use std::{
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 #[cfg(windows)]
@@ -33,41 +33,6 @@ use std::os::windows::process::CommandExt;
 
 #[cfg(windows)]
 use winreg::{enums::HKEY_USERS, RegKey};
-
-#[cfg(windows)]
-fn apply_native_window_frame(window: &WebviewWindow) {
-    const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
-    const DWMWA_BORDER_COLOR: u32 = 34;
-    const DWMWA_COLOR_DEFAULT: u32 = 0xffff_ffff;
-    const DWMWCP_ROUND: u32 = 2;
-
-    #[link(name = "dwmapi")]
-    unsafe extern "system" {
-        fn DwmSetWindowAttribute(
-            hwnd: *mut std::ffi::c_void,
-            attribute: u32,
-            value: *const std::ffi::c_void,
-            value_size: u32,
-        ) -> i32;
-    }
-
-    if let Ok(hwnd) = window.hwnd() {
-        unsafe {
-            let _ = DwmSetWindowAttribute(
-                hwnd.0,
-                DWMWA_BORDER_COLOR,
-                (&DWMWA_COLOR_DEFAULT as *const u32).cast(),
-                std::mem::size_of::<u32>() as u32,
-            );
-            let _ = DwmSetWindowAttribute(
-                hwnd.0,
-                DWMWA_WINDOW_CORNER_PREFERENCE,
-                (&DWMWCP_ROUND as *const u32).cast(),
-                std::mem::size_of::<u32>() as u32,
-            );
-        }
-    }
-}
 
 const GAME_MANIFEST_URL: &str = "https://openshores.net/downloads/manifest.json";
 const PATCH_RELEASE_API: &str =
@@ -2522,6 +2487,7 @@ fn open_link(url: String) -> LauncherResult<()> {
     let allowed = [
         "https://openshores.net/",
         "https://github.com/Celarious/OpenShores-IP-Patch",
+        "https://github.com/Norway174/OpenShores-Launcher",
     ];
     if !allowed.iter().any(|prefix| url.starts_with(prefix)) {
         return Err("Blocked external URL.".to_string());
@@ -2628,25 +2594,6 @@ async fn install_launcher_update(
     result
 }
 
-#[tauri::command]
-fn window_minimize(window: WebviewWindow) -> LauncherResult<()> {
-    window.minimize().map_err(error_string)
-}
-
-#[tauri::command]
-fn window_maximize(window: WebviewWindow) -> LauncherResult<()> {
-    if window.is_maximized().map_err(error_string)? {
-        window.unmaximize().map_err(error_string)
-    } else {
-        window.maximize().map_err(error_string)
-    }
-}
-
-#[tauri::command]
-fn window_close(window: WebviewWindow) -> LauncherResult<()> {
-    window.close().map_err(error_string)
-}
-
 fn error_string(error: impl std::fmt::Display) -> String {
     error.to_string()
 }
@@ -2684,9 +2631,6 @@ fn main() {
             open_link,
             check_updates,
             install_launcher_update,
-            window_minimize,
-            window_maximize,
-            window_close
         ])
         .setup(|app| {
             cleanup_legacy_electron_data()
@@ -2694,19 +2638,17 @@ fn main() {
             let webview_data = launcher_data_path()
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?
                 .join("webview");
-            let window =
-                WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
-                    .title("OpenShores Launcher")
-                    .inner_size(800.0, 640.0)
-                    .min_inner_size(700.0, 560.0)
-                    .center()
-                    .decorations(false)
-                    .transparent(false)
-                    .shadow(true)
-                    .data_directory(webview_data)
-                    .build()?;
-            #[cfg(windows)]
-            apply_native_window_frame(&window);
+            WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+                .title("OpenShores Launcher")
+                .inner_size(800.0, 640.0)
+                .min_inner_size(700.0, 560.0)
+                .center()
+                .decorations(true)
+                .maximizable(false)
+                .transparent(false)
+                .shadow(true)
+                .data_directory(webview_data)
+                .build()?;
             let app_handle = app.handle().clone();
             let backend = app.state::<AppState>().inner().clone();
             thread::spawn(move || {

@@ -26,9 +26,6 @@ window.launcher = {
   openLink: url => invoke('open_link', { url }),
   checkUpdates: () => invoke('check_updates'),
   installUpdate: () => invoke('install_launcher_update'),
-  minimize: () => invoke('window_minimize'),
-  maximize: () => invoke('window_maximize'),
-  close: () => invoke('window_close'),
   onProgress: callback => listen('operation-progress', event => callback(event.payload)),
   onOperationStatus: callback => listen('operation-status', event => callback(event.payload)),
   onGameStatus: callback => listen('game-status', event => callback(event.payload)),
@@ -629,8 +626,6 @@ document.addEventListener('keydown', event => {
     closeStopModal();
   }
 });
-$('#minimize').addEventListener('click', () => window.launcher.minimize());
-$('#close').addEventListener('click', () => window.launcher.close());
 document.querySelectorAll('[data-url]').forEach(button => button.addEventListener('click', () => window.launcher.openLink(button.dataset.url).catch(showError)));
 
 async function loadPatchReleases() {
