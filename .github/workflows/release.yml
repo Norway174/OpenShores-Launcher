@@ -35,7 +35,7 @@ jobs:
           "changed=$($changed.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
           "version=$current" >> $env:GITHUB_OUTPUT
 
-  build-and-release:
+  build-windows:
     needs: detect-version-change
     if: needs.detect-version-change.outputs.changed == 'true'
     runs-on: windows-latest
@@ -53,6 +53,47 @@ jobs:
       - name: Build portable launcher
         run: npm run dist
 
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          path: dist/OpenShores-Launcher.exe
+
+  build-linux:
+    needs: detect-version-change
+    if: needs.detect-version-change.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable-x86_64-unknown-linux-gnu
+
+      - name: Install tauri CLI
+        run: cargo install tauri-cli@2.11.4
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Build portable launcher
+        run: npm run dist:linux
+
+      - name: Rename binary
+        run: mv ./src-tauri/target/release/bundle/appimage/*.AppImage dist/OpenShores-Launcher-amd64.AppImage
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          path: dist/OpenShores-Launcher-amd64.AppImage
+
+  publish-release:
+    needs: [build-linux, build-windows]
+    if: needs.detect-version-change.outputs.changed == 'true'
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v8
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
@@ -61,4 +102,6 @@ jobs:
           target_commitish: ${{ github.sha }}
           generate_release_notes: true
           fail_on_unmatched_files: true
-          files: dist/OpenShores-Launcher.exe
+          files: |
+            dist/OpenShores-Launcher.exe
+            dist/OpenShores-Launcher-amd64.AppImage

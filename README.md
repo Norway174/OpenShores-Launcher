@@ -2,7 +2,7 @@
 
 ![OpenShores space banner](assets/figma/space-banner.png)
 
-A fast, portable Windows launcher for [OpenShores](https://openshores.net/), built with Tauri. It downloads the official game client, applies the latest compatible [OpenShores IP Patch](https://github.com/Celarious/OpenShores-IP-Patch), launches the game, and manages updates and uninstallation from a compact native interface.
+A fast, portable Windows and Linux launcher for [OpenShores](https://openshores.net/), built with Tauri. It downloads the official game client, applies the latest compatible [OpenShores IP Patch](https://github.com/Celarious/OpenShores-IP-Patch), launches the game, and manages updates and uninstallation from a compact native interface.
 
 ## Features
 
@@ -15,20 +15,34 @@ A fast, portable Windows launcher for [OpenShores](https://openshores.net/), bui
 - Refreshes or removes the launcher-managed game installation.
 - Checks IP patch and launcher update channels independently.
 - Updates the portable launcher executable in place—no installer required.
-- Stores settings and working data under `%LOCALAPPDATA%\OpenShores-Launcher`.
-- Defaults the game installation to `%LOCALAPPDATA%\OpenShores`.
+- Stores settings and working data under:
+    - Windows: `%LOCALAPPDATA%\OpenShores-Launcher`
+    - Linux: `$HOME/.local/OpenShores-Launcher`
+- Defaults the game installation to:
+    - Windows: `%LOCALAPPDATA%\OpenShores`
+    - Linux: `$HOME/.local/OpenShores`
 
 ## Using the launcher
 
 ### Requirements
 
+#### All Platforms
+- An internet connection for game installation and update checks.
+
+#### Windows
 - Windows 10 or Windows 11, 64-bit.
 - Microsoft Edge WebView2 Runtime. It is included with current Windows releases and does not normally need to be installed separately.
-- An internet connection for game installation and update checks.
+
+#### Linux
+- Any 64-bit x86 Linux distribution
+- glibc 2.35+
+- xdelta3
+- wine
+    - The chosen WINEPREFIX must have VS2015 (MSVC140) installed in it for the IP Patch to work.
 
 ### Run it
 
-1. Download `OpenShores-Launcher.exe` from the repository's **Releases** page.
+1. Download the proper version for your operating system from the repository's **Releases** page.
 2. Move the executable to a permanent, user-writable location, such as a folder under Documents or `%LOCALAPPDATA%`. Avoid `Program Files`, because the portable self-updater must be able to replace the executable. (Optional)
 3. Double-click the executable. No installation required.
 4. Select **Install OpenShores**. The launcher downloads and verifies the clean client files, downloads the selected IP patch, and applies it automatically.
@@ -40,25 +54,27 @@ The game installation folder can be changed from **Settings** before installatio
 
 The portable executable remains wherever you placed it. Launcher-specific data is stored separately:
 
-| Location | Purpose |
-| --- | --- |
-| `%LOCALAPPDATA%\OpenShores-Launcher\config.json` | Launcher settings and the configured game path |
-| `%LOCALAPPDATA%\OpenShores-Launcher\temp` | Downloads, update files, and temporary replacement scripts |
-| `%LOCALAPPDATA%\OpenShores-Launcher\webview` | WebView2 application data |
-| `%LOCALAPPDATA%\OpenShores` | Default managed game installation |
+| Location (Windows)                                | Location (Linux)                              | Purpose                                                       |
+| ------------------------------------------------- | --------------------------------------------- | ------------------------------------------------------------- |
+| `%LOCALAPPDATA%\OpenShores-Launcher\config.json`  | `$HOME/.local/OpenShores-Launcher/config.json | Launcher settings and the configured game path                |
+| `%LOCALAPPDATA%\OpenShores-Launcher\temp`         | `$HOME/.local/OpenShores-Launcher/temp        | Downloads, update files, and temporary replacement scripts    |
+| `%LOCALAPPDATA%\OpenShores-Launcher\webview`      | `$HOME/.local/OpenShores-Launcher/webview     | WebView2 application data                                     |
+| `%LOCALAPPDATA%\OpenShores`                       | `$HOME/.local/OpenShores                      | Default managed game installation                             |
 
-Selecting **Uninstall OpenShores** removes the managed game installation, not the launcher itself. To remove the launcher completely, close it, delete its portable `.exe`, and optionally delete `%LOCALAPPDATA%\OpenShores-Launcher` if you also want to remove its settings and cached data.
+Selecting **Uninstall OpenShores** removes the managed game installation, not the launcher itself. To remove the launcher completely, close it, delete its portable `.exe` or `.AppImage`, and optionally delete `%LOCALAPPDATA%\OpenShores-Launcher` / `$HOME/.local/OpenShores-Launcher` if you also want to remove its settings and cached data.
 
 ## Screenshots
 ![Application Preview](assets/appPreview.png)
 
 ## Contributing
 
-Contributions and issue reports are welcome. Development currently targets 64-bit Windows.
+Contributions and issue reports are welcome. Development currently targets 64-bit Windows and 64-bit x86 Linux.
 
 ### Development requirements
 
 Install the following before cloning the project:
+
+#### Windows
 
 - [Git for Windows](https://git-scm.com/download/win)
 - [Node.js](https://nodejs.org/) with npm
@@ -66,8 +82,18 @@ Install the following before cloning the project:
 - Microsoft Visual Studio Build Tools with the **Desktop development with C++** workload
 - Microsoft Edge WebView2 Runtime
 
+#### Linux
+
+- `git`
+- `rust` (stable-x86_64-unknown-linux-gnu)
+    - [`tauri-cli` crate](https://crates.io/crates/tauri-cli)
+- `npm`
+- `webkit2gtk`
+- `gtk3`
+
 ### Clone and run
 
+#### Windows
 ```powershell
 git clone https://github.com/Norway174/OpenShores-Launcher.git
 cd OpenShores-Launcher
@@ -76,6 +102,15 @@ npm start
 ```
 
 `npm start` compiles the Rust backend in development mode and launches the Tauri application. The frontend has no JavaScript package dependencies; npm is used as a convenient entry point for the PowerShell build scripts.
+
+#### Linux
+```bash
+git clone https://github.com/Norway174/OpenShores-Launcher.git
+cd OpenShores-Launcher
+cargo tauri dev
+```
+
+`cargo tauri dev` launches the Tauri application in development mode, with hot-reloading for Rust code.
 
 ### Test and build
 
@@ -116,7 +151,7 @@ Do not commit `src-tauri/target`, `src-tauri/gen`, `dist`, or `node_modules`; th
 - IP patch releases: [Celarious/OpenShores-IP-Patch](https://github.com/Celarious/OpenShores-IP-Patch)
 - Launcher updates: releases from `Norway174/OpenShores-Launcher`
 
-Binary patch application uses the embedded xdelta3 3.0.11 executable. xdelta3 is distributed under GPLv2, and its license is included at `resources/xdelta3/COPYING`.
+Binary patch application uses the embedded xdelta3 3.0.11 executable on Windows. xdelta3 is distributed under GPLv2, and its license is included at `resources/xdelta3/COPYING`. On Linux, the system is expected to have `xdelta3` available in the path.
 
 ## Disclaimer
 

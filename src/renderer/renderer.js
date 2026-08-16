@@ -3,6 +3,7 @@
 const $ = selector => document.querySelector(selector);
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
+const { platform } = window.__TAURI__.os;
 window.launcher = {
   getState: () => invoke('get_state'),
   chooseFolder: () => invoke('choose_folder'),
@@ -28,6 +29,7 @@ window.launcher = {
   checkPatchUpdate: () => invoke('check_ip_patch_update'),
   checkGameUpdate: () => invoke('check_game_update'),
   installUpdate: () => invoke('install_launcher_update'),
+  checkPath: (cmd) => invoke('check_path', { cmd }),
   onProgress: callback => listen('operation-progress', event => callback(event.payload)),
   onOperationStatus: callback => listen('operation-status', event => callback(event.payload)),
   onGameStatus: callback => listen('game-status', event => callback(event.payload)),
@@ -53,6 +55,10 @@ const maintenanceQueue = [];
 let maintenanceActive = false;
 let maintenanceGeneration = 0;
 let activeUpdateKind = null;
+let linuxState = {
+  winePath: null,
+  xdeltaPath: null
+}
 
 function connectedServer() {
   return state?.servers?.find(server => server.id === state.connectedServerId) || null;
@@ -853,9 +859,54 @@ async function loadPatchReleases() {
   }
 }
 
+async function loadLinuxState() {
+  linuxState = {
+    winePath: null,
+    xdeltaPath: null
+  }
+
+  try {
+    linuxState.winePath = (await window.launcher.checkPath("wine")).path;
+  } catch (error) {
+    showError(`wine - Missing from $PATH: ${error?.message || String(error)}`);
+  }
+
+  try {
+    linuxState.xdeltaPath = (await window.launcher.checkPath("xdelta3")).path;
+  } catch (error) {
+    showError(`xdelta3 - Missing from $PATH: ${error?.message || String(error)}`)
+  }
+
+  try {
+    const container = $('#linux-info');
+    container.innerHTML = '';
+
+    for (const [title, value] of [['WINE PATH', linuxState.winePath], ['XDELTA3 PATH', linuxState.xdeltaPath]]) {
+      if (value == null) {
+        continue;
+      }
+      
+      const outer = document.createElement("div");
+      const span = document.createElement("span");
+      span.textContent = title;
+      const strong = document.createElement("strong");
+      strong.textContent = value;
+
+      outer.appendChild(span);
+      outer.appendChild(strong);
+      container.appendChild(outer);
+    }
+  } catch (error){
+    console.log(error);
+    showError(`Failed to update linux-specific state: ${error?.message}`);
+  }
+}
+
 window.launcher.getState().then(nextState => {
   render(nextState);
-  loadPatchReleases();
+  if (platform() == "linux") {
+    loadLinuxState();
+  }
   refreshServerStatuses();
   serverStatusTimer = window.setInterval(refreshServerStatuses, 10000);
   enqueueMaintenance('launcher', 'check');

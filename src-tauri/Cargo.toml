@@ -9,7 +9,7 @@ build = "build.rs"
 
 [build-dependencies]
 serde_json = "1"
-tauri-build = "2.6.3"
+tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
 open = "5.3.2"
@@ -21,11 +21,15 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha1 = "0.10"
 sha2 = "0.10"
-tauri = "2.11.5"
+tauri = { version = "2.11.5", features = [] }
 tauri-plugin-single-instance = "2"
+tauri-plugin-os = "2.3.2"
 time = { version = "0.3", features = ["formatting"] }
-winreg = "0.55"
 zip = { version = "8.1.0", default-features = false, features = ["deflate"] }
+which = "8.0.5"
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"
 
 [profile.release]
 codegen-units = 1

@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Default capability for the OpenShores launcher window",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "os:default"]
 }
