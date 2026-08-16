@@ -73,12 +73,13 @@ jobs:
         with:
           toolchain: stable-x86_64-unknown-linux-gnu
 
-      - name: Install tauri CLI
-        run: cargo install tauri-cli@2.11.4
-
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          cache-all-crates: true
+
+      - name: Install tauri CLI
+        run: cargo install tauri-cli@2.11.4
 
       - name: Build portable launcher
         run: npm run dist:linux
@@ -116,5 +117,5 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
-            OpenShores-Launcher.exe
-            OpenShores-Launcher-amd64.AppImage
+            OpenShores-Launcher/OpenShores-Launcher.exe
+            OpenShores-Launcher/OpenShores-Launcher-amd64.AppImage
