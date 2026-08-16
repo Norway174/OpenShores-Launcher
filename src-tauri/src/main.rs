@@ -32,7 +32,7 @@ use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use std::os::windows::process::CommandExt;
 
 #[cfg(windows)]
-use winreg::{enums::HKEY_USERS, RegKey};
+use winreg::{enums::HKEY_CURRENT_USER, RegKey};
 
 const GAME_MANIFEST_URL: &str = "https://openshores.net/downloads/manifest.json";
 const PATCH_RELEASE_API: &str =
@@ -49,7 +49,7 @@ const XDELTA_TIMEOUT: Duration = Duration::from_secs(120);
 const XDELTA_NAME: &str = "xdelta3-3.0.11-x86_64.exe";
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const DEFAULT_SERVER_HOST: &str = "play.openshores.net";
-const ACCOUNT_REGISTRY_PATH: &str = r"S-1-5-21-3753878440-1344555032-1767538306-1002\Software\Software Engineering\Shores of Hazeron\Account";
+const ACCOUNT_REGISTRY_PATH: &str = r"Software\Software Engineering\Shores of Hazeron\Account";
 const XDELTA_BYTES: &[u8] = include_bytes!("../../resources/xdelta3/xdelta3-3.0.11-x86_64.exe");
 
 type LauncherResult<T> = Result<T, String>;
@@ -655,8 +655,8 @@ fn fetch_server_status(client: &Client, server: &ServerConfig) -> ServerStatus {
 
 #[cfg(windows)]
 fn write_game_account_registry(host: &str, account: Option<&SavedAccount>) -> LauncherResult<bool> {
-    let users = RegKey::predef(HKEY_USERS);
-    let (key, _) = users
+    let current_user = RegKey::predef(HKEY_CURRENT_USER);
+    let (key, _) = current_user
         .create_subkey(ACCOUNT_REGISTRY_PATH)
         .map_err(error_string)?;
     key.set_value("Host", &host).map_err(error_string)?;
@@ -2934,6 +2934,12 @@ mod tests {
             .map(|character| format!("{:02x}", character as u32))
             .collect();
         assert_eq!(payload_hex, "5baa61e4c9b93f3f0682250b6cf8331b7ee68fd8");
+    }
+
+    #[test]
+    fn account_registry_path_is_relative_to_the_current_user() {
+        assert!(ACCOUNT_REGISTRY_PATH.starts_with(r"Software\"));
+        assert!(!ACCOUNT_REGISTRY_PATH.contains("S-1-5-"));
     }
 
     #[test]
