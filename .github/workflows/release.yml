@@ -56,6 +56,7 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v7
         with:
+          name: artifact-windows
           path: dist/OpenShores-Launcher.exe
 
   build-linux:
@@ -88,6 +89,7 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v7
         with:
+          name: artifact-linux
           path: dist/OpenShores-Launcher-amd64.AppImage
 
   publish-release:
@@ -95,8 +97,16 @@ jobs:
     if: needs.detect-version-change.outputs.changed == 'true'
     runs-on: ubuntu-22.04
     steps:
-      - name: Download artifacts
+      - name: Download Windows artifact
         uses: actions/download-artifact@v8
+        with:
+          name: artifact-windows
+          path: OpenShores-Launcher.exe
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: artifact-linux
+          path: OpenShores-Launcher-amd64.AppImage
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
@@ -106,5 +116,5 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
-            dist/OpenShores-Launcher.exe
-            dist/OpenShores-Launcher-amd64.AppImage
+            OpenShores-Launcher.exe
+            OpenShores-Launcher-amd64.AppImage
