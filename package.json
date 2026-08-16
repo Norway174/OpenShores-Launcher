@@ -9,6 +9,6 @@
     "test": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-tauri.ps1",
     "build": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-tauri.ps1",
     "dist": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-tauri.ps1",
-    "dist:linux": "NO_STRIP=true cargo tauri build -b appimage"
+    "dist:linux": "rm -rf dist && mkdir dist && NO_STRIP=true cargo tauri build -b appimage"
   }
 }
