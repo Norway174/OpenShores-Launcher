@@ -94,7 +94,7 @@ jobs:
           path: dist/OpenShores-Launcher-amd64.AppImage
 
   publish-release:
-    needs: [build-linux, build-windows]
+    needs: [build-linux, build-windows, detect-version-change]
     if: needs.detect-version-change.outputs.changed == 'true'
     runs-on: ubuntu-22.04
     steps:
