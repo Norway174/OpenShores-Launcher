@@ -45,7 +45,7 @@ const GAME_MANIFEST_URL: &str = "https://openshores.net/downloads/manifest.json"
 const PATCH_RELEASE_API: &str =
     "https://api.github.com/repos/Celarious/OpenShores-IP-Patch/releases?per_page=100";
 const LAUNCHER_RELEASE_API: &str =
-    "https://api.github.com/repos/dgcole/OpenShores-Launcher/releases/latest";
+    "https://api.github.com/repos/Norway174/OpenShores-Launcher/releases/latest";
 const GAME_EXE: &str = "Shores of Hazeron.exe";
 const GAME_DLL: &str = "AuLoginClient13.dll";
 const MANIFEST_FILE: &str = ".openshores-launcher.json";
