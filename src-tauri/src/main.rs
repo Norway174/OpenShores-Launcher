@@ -52,6 +52,8 @@ const MANIFEST_FILE: &str = ".openshores-launcher.json";
 const MANAGED_BY: &str = "OpenShores Launcher";
 const LATEST_PATCH_RELEASE: &str = "latest";
 const PATCH_ORIGINALS_DIR: &str = ".openshores-patch-originals";
+const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const METADATA_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const XDELTA_TIMEOUT: Duration = Duration::from_secs(120);
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const DEFAULT_SERVER_HOST: &str = "play.openshores.net";
@@ -551,6 +553,7 @@ fn http_client() -> LauncherResult<Client> {
             "OpenShores-Launcher/{}",
             env!("OPENSHORES_LAUNCHER_VERSION")
         ))
+        .connect_timeout(HTTP_CONNECT_TIMEOUT)
         .build()
         .map_err(error_string)
 }
@@ -629,25 +632,40 @@ fn hazeron_password_value_from_hex(password_sha1: &str) -> LauncherResult<String
     if !is_valid_password_sha1(password_sha1) {
         return Err("The saved account password hash is invalid.".to_string());
     }
-    let bytes = (0..40)
+    let payload = (0..40)
         .step_by(2)
         .map(|index| {
             u8::from_str_radix(&password_sha1[index..index + 2], 16)
+                .map(char::from)
                 .map_err(|_| "The saved account password hash is invalid.".to_string())
         })
-        .collect::<LauncherResult<Vec<_>>>()?;
-    let payload: String = unsafe { String::from_utf8_unchecked(bytes) };
+        .collect::<LauncherResult<String>>()?;
 
-    if cfg!(target_os = "linux") {
-        // We need a hex string format to insert this on Linux with `wine REG ADD`.
-        Ok(format!("@ByteArray({payload})")
-            .as_bytes()
-            .iter()
-            .map(|byte| format!("{:02x}00", byte))
-            .collect())
-    } else {
-        Ok(format!("@ByteArray({payload})"))
+    Ok(format!("@ByteArray({payload})"))
+}
+
+fn registry_utf16le_hex(value: &str) -> String {
+    let mut bytes = Vec::with_capacity((value.encode_utf16().count() + 1) * 2);
+    for code_unit in value.encode_utf16().chain(std::iter::once(0)) {
+        bytes.extend_from_slice(&code_unit.to_le_bytes());
     }
+    bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn wine_password_registry_import(key: &str, password_value: &str) -> Vec<u8> {
+    let text = format!(
+        "Windows Registry Editor Version 5.00\r\n\r\n[{key}]\r\n\"Password\"=hex(1):{}\r\n",
+        registry_utf16le_hex(password_value)
+    );
+    let mut bytes = vec![0xff, 0xfe];
+    for code_unit in text.encode_utf16() {
+        bytes.extend_from_slice(&code_unit.to_le_bytes());
+    }
+    bytes
 }
 
 fn response_error(response: Response, fallback: &str) -> String {
@@ -714,67 +732,75 @@ fn write_game_account_registry(host: &str, account: Option<&SavedAccount>) -> La
 }
 
 #[cfg(target_os = "linux")]
+fn run_wine_registry_command(wine: &Path, arguments: &[&str]) -> LauncherResult<()> {
+    let status = Command::new(wine)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .args(arguments)
+        .status()
+        .map_err(|error| format!("wine registry command failed: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("wine registry command exited with {status}."))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn write_wine_password_registry(
+    wine: &Path,
+    key: &str,
+    password_value: &str,
+) -> LauncherResult<()> {
+    let temp = launcher_temp_path()?;
+    fs::create_dir_all(&temp).map_err(error_string)?;
+    let import_path = temp.join(format!("account-password-{}.reg", unique_token()));
+    fs::write(
+        &import_path,
+        wine_password_registry_import(key, password_value),
+    )
+    .map_err(error_string)?;
+    let import_path_text = import_path.to_string_lossy().into_owned();
+    let result = run_wine_registry_command(wine, &["REG", "IMPORT", &import_path_text]);
+    let _ = fs::remove_file(import_path);
+    result
+}
+
+#[cfg(target_os = "linux")]
 fn write_game_account_registry(
     host: &str,
     account: Option<&SavedAccount>,
 ) -> LauncherResult<bool> {
-    let key = format!("HKU\\{}", ACCOUNT_REGISTRY_PATH);
+    let key = format!("HKEY_USERS\\{}", ACCOUNT_REGISTRY_PATH);
     let wine = which(WINE_NAME).map_err(error_string)?;
 
+    run_wine_registry_command(
+        &wine,
+        &["REG", "ADD", &key, "/v", "Host", "/t", "REG_SZ", "/d", host, "/f"],
+    )?;
     if let Some(account) = account {
-
-        for (value_name, value_type, value) in [
-        (
-            "Host",
-            "REG_SZ",
-            host
-        ),
-        (
-            "Name",
-            "REG_SZ",
-            &account.username
-        ),
-        (
-            "Password",
-            "REG_BINARY",
-            &hazeron_password_value_from_hex(&account.password_sha1)?
-        ),
-        (
-            "SavePass",
-            "REG_DWORD",
-            "1"
-        )
-        ] {
-            let mut command = Command::new(&wine);
-
-            // Use wine REG command to add via CLI
-            command
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::inherit())
-                .args([
-                    "REG",
-                    "ADD",
-                    &key,
-                    "/v", value_name,
-                    "/t", value_type,
-                    "/d", value,
-                    "/f"
-                ]);
-            
-            command.spawn()
-                .map_err(error_string)
-                .map_err(|e| {
-                    format!("wine REG ADD error: {e}")
-                })
-                ?
-                .wait()
-                .map_err(error_string)
-                .map_err(|e| {
-                    format!("wine REG ADD error: {e}")
-                })?;
-            
-        }
+        run_wine_registry_command(
+            &wine,
+            &[
+                "REG",
+                "ADD",
+                &key,
+                "/v",
+                "Name",
+                "/t",
+                "REG_SZ",
+                "/d",
+                &account.username,
+                "/f",
+            ],
+        )?;
+        let password = hazeron_password_value_from_hex(&account.password_sha1)?;
+        write_wine_password_registry(&wine, &key, &password)?;
+        run_wine_registry_command(
+            &wine,
+            &["REG", "ADD", &key, "/v", "SavePass", "/t", "REG_DWORD", "/d", "1", "/f"],
+        )?;
         Ok(true)
     } else {
         Ok(false)
@@ -874,7 +900,11 @@ fn manifest_base_url(manifest: &GameManifest) -> LauncherResult<Url> {
 
 fn fetch_game_manifest(client: &Client) -> LauncherResult<GameManifest> {
     let response = checked_response(
-        client.get(GAME_MANIFEST_URL).send().map_err(error_string)?,
+        client
+            .get(GAME_MANIFEST_URL)
+            .timeout(METADATA_REQUEST_TIMEOUT)
+            .send()
+            .map_err(error_string)?,
         "Game manifest download",
     )?;
     let manifest: GameManifest = response.json().map_err(error_string)?;
@@ -1192,7 +1222,11 @@ fn apply_delta(source: &Path, delta: &Path, output: &Path) -> LauncherResult<()>
 
 fn fetch_patch_releases(client: &Client) -> LauncherResult<Vec<GithubRelease>> {
     let response = checked_response(
-        client.get(PATCH_RELEASE_API).send().map_err(error_string)?,
+        client
+            .get(PATCH_RELEASE_API)
+            .timeout(METADATA_REQUEST_TIMEOUT)
+            .send()
+            .map_err(error_string)?,
         "IP patch release check",
     )?;
     let mut releases: Vec<GithubRelease> = response.json().map_err(error_string)?;
@@ -1505,26 +1539,48 @@ fn update_ip_patch_sync(
     if !is_managed_manifest(read_json::<Value>(&install_path.join(MANIFEST_FILE)).as_ref()) {
         return get_snapshot(state);
     }
-    let client = http_client()?;
-    let releases = fetch_patch_releases(&client)?;
-    let release = resolve_patch_release(&releases, &config.ip_patch_release)?;
-    if !force && config.applied_ip_patch_release.as_deref() == Some(&release.tag_name) {
-        return get_snapshot(state);
-    }
     let guard = begin_operation(state)?;
     if any_game_process_running(state)? {
         return Err("Close OpenShores before updating the IP patch.".to_string());
     }
     emit_operation_status(app, true, None);
-    let work = launcher_temp_path()?.join(format!("ip-patch-{}", unique_token()));
+    emit_progress(
+        app,
+        "Checking the IP patch",
+        1.0,
+        "Contacting GitHub for the selected release...",
+    );
+    let mut work = None;
     let result = (|| {
+        let client = http_client()?;
+        let releases = fetch_patch_releases(&client)?;
+        let release = resolve_patch_release(&releases, &config.ip_patch_release)?;
+        if !force && config.applied_ip_patch_release.as_deref() == Some(&release.tag_name) {
+            emit_progress(
+                app,
+                "IP patch is up to date",
+                100.0,
+                format!("{} is already installed.", release.tag_name),
+            );
+            return get_snapshot(state);
+        }
         emit_progress(
             app,
             "Checking the IP patch",
-            1.0,
+            3.0,
             format!("Selected release: {}", release.tag_name),
         );
-        download_and_apply_patch(app, &client, &release, &install_path, &work, 5.0, 75.0)?;
+        let patch_work = launcher_temp_path()?.join(format!("ip-patch-{}", unique_token()));
+        work = Some(patch_work.clone());
+        download_and_apply_patch(
+            app,
+            &client,
+            &release,
+            &install_path,
+            &patch_work,
+            5.0,
+            75.0,
+        )?;
         update_manifest_patch(&install_path, &release)?;
         save_applied_patch_release(&release.tag_name)?;
         emit_progress(
@@ -1535,7 +1591,9 @@ fn update_ip_patch_sync(
         );
         get_snapshot(state)
     })();
-    let _ = fs::remove_dir_all(&work);
+    if let Some(work) = work {
+        let _ = fs::remove_dir_all(work);
+    }
     drop(guard);
     match result {
         Ok(mut snapshot) => {
@@ -1738,7 +1796,7 @@ fn launch_game_sync(
         // SoH exe needs to be run through Wine on Linux
         let mut command = if cfg!(target_os = "linux") {
             let wine = which(WINE_NAME).map_err(error_string)?;
-            
+
             let mut wine_command = Command::new(&wine);
             wine_command.arg(&executable);
             wine_command
@@ -1746,17 +1804,19 @@ fn launch_game_sync(
             Command::new(&executable)
         };
 
-        
         if let Some(mode) = designer_mode {
             command.arg(designer_launch_argument(mode)?);
-        } else if let Some(server_id) = config.connected_server_id.as_deref() {
-            let server = server_by_id(&config, server_id)?;
-            let active_account = config
-                .accounts
-                .iter()
-                .find(|account| account.server_id == server.id);
-            if write_game_account_registry(&server.host, active_account)? {
-                command.arg("-launcher");
+        } else {
+            command.arg("-launcher");
+            if let Some(server_id) = config.connected_server_id.as_deref() {
+                let server = server_by_id(&config, server_id)?;
+                let active_account = config
+                    .accounts
+                    .iter()
+                    .find(|account| account.server_id == server.id);
+                if write_game_account_registry(&server.host, active_account)? {
+                    command.arg("-nologin");
+                }
             }
         }
         let mut child = command
@@ -1872,6 +1932,7 @@ fn check_updates_sync(
     let client = http_client()?;
     let response = client
         .get(LAUNCHER_RELEASE_API)
+        .timeout(METADATA_REQUEST_TIMEOUT)
         .send()
         .map_err(error_string)?;
     if response.status().as_u16() == 404 {
@@ -2743,7 +2804,7 @@ fn install_launcher_update_sync(app: &AppHandle, state: &AppState) -> LauncherRe
         "installing",
         format!("Installing launcher {}...", pending.version),
     );
-    
+
     #[cfg(windows)]
     {
         let target = env::current_exe().map_err(error_string)?;
@@ -2800,7 +2861,7 @@ fn install_launcher_update_sync(app: &AppHandle, state: &AppState) -> LauncherRe
             app.exit(0);
         });
     }
-    
+
     #[cfg(target_os = "linux")]
     {
         // Can't use current_exe() b/c we're in an AppImage, $APPIMAGE is
@@ -3106,6 +3167,43 @@ mod tests {
             .map(|character| format!("{:02x}", character as u32))
             .collect();
         assert_eq!(payload_hex, "5baa61e4c9b93f3f0682250b6cf8331b7ee68fd8");
+    }
+
+    #[test]
+    fn hazeron_password_preserves_every_digest_byte_as_one_utf16_code_unit() {
+        let stored_hash: String = (0_u8..20).map(|byte| format!("{byte:02x}")).collect();
+        let value = hazeron_password_value_from_hex(&stored_hash).unwrap();
+        let code_units: Vec<u16> = value.encode_utf16().collect();
+
+        assert_eq!(code_units.len(), 32);
+        assert_eq!(&code_units[..11], &"@ByteArray(".encode_utf16().collect::<Vec<_>>());
+        assert_eq!(&code_units[11..31], &(0_u16..20).collect::<Vec<_>>());
+        assert_eq!(code_units[31], ')' as u16);
+        assert!(registry_utf16le_hex(&value).ends_with("29,00,00,00"));
+    }
+
+    #[test]
+    fn wine_password_import_is_utf16_reg_sz_data() {
+        let value = hazeron_password_value_from_hex(
+            "000102030405060708090a0b0c0d0e0f10111213",
+        )
+        .unwrap();
+        let import = wine_password_registry_import(
+            r"HKEY_USERS\S-1-5-21-0-0-0-1000\Software\Software Engineering\Shores of Hazeron\Account",
+            &value,
+        );
+
+        assert_eq!(&import[..2], &[0xff, 0xfe]);
+        let text = String::from_utf16(
+            &import[2..]
+                .chunks_exact(2)
+                .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        assert!(text.starts_with("Windows Registry Editor Version 5.00\r\n"));
+        assert!(text.contains("\"Password\"=hex(1):40,00,42,00"));
+        assert!(text.ends_with("29,00,00,00\r\n"));
     }
 
     #[test]

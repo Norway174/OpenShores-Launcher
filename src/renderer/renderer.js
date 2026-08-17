@@ -783,6 +783,10 @@ $('#choose-folder').addEventListener('click', async () => {
 $('#uninstall').addEventListener('click', () => runOperation(window.launcher.uninstall));
 $('#refresh-game').addEventListener('click', () => enqueueMaintenance('game', 'update'));
 $('#update-patch').addEventListener('click', () => enqueueMaintenance('patch', 'update'));
+$('#refresh-patch-releases').addEventListener('click', () => {
+  clearError();
+  loadPatchReleases();
+});
 $('#patch-release').addEventListener('change', event => {
   const selection = event.currentTarget.value;
   state = { ...state, ipPatchRelease: selection };
@@ -838,6 +842,9 @@ creatorCredit.addEventListener('click', () => {
 
 async function loadPatchReleases() {
   const select = $('#patch-release');
+  const refresh = $('#refresh-patch-releases');
+  refresh.disabled = true;
+  refresh.classList.add('loading');
   try {
     const releases = await window.launcher.getPatchReleases();
     const selected = state?.ipPatchRelease || 'latest';
@@ -856,6 +863,8 @@ async function loadPatchReleases() {
     showError(`Could not load IP patch releases: ${error?.message || String(error)}`);
   } finally {
     select.disabled = busy;
+    refresh.disabled = busy;
+    refresh.classList.remove('loading');
   }
 }
 
@@ -902,13 +911,14 @@ async function loadLinuxState() {
   }
 }
 
-window.launcher.getState().then(nextState => {
+window.launcher.getState().then(async nextState => {
   render(nextState);
   if (platform() == "linux") {
     loadLinuxState();
   }
   refreshServerStatuses();
   serverStatusTimer = window.setInterval(refreshServerStatuses, 10000);
+  await loadPatchReleases();
   enqueueMaintenance('launcher', 'check');
   enqueueMaintenance('patch', 'check');
   enqueueMaintenance('game', 'check');

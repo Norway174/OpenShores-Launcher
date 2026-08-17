@@ -153,6 +153,11 @@ h1 { margin: 4px 0 0; font-family: "Arial Narrow", "Segoe UI", sans-serif; font-
 .setting-row strong { font-size: 11px; font-weight: 600; }
 .setting-row p { margin: 3px 0 0; color: #858585; font-size: 9px; }
 .setting-control { display: flex; align-items: center; gap: 8px; }
+.refresh-icon-button { width: 24px; height: 30px; display: grid; flex: 0 0 24px; place-items: center; padding: 0; border: 0; border-radius: 2px; color: #858585; background: transparent; cursor: pointer; }
+.refresh-icon-button svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.refresh-icon-button:hover, .refresh-icon-button:focus-visible { color: #ddd; background: rgba(255, 255, 255, .07); outline: 0; }
+.refresh-icon-button:disabled { color: #595959; cursor: default; background: transparent; }
+.refresh-icon-button.loading svg { animation: spin .75s linear infinite; }
 .setting-control select { width: 190px; height: 34px; padding: 0 28px 0 10px; border: 1px solid #555; border-radius: 2px; color: #ddd; background: #292929; font: inherit; font-size: 10px; }
 .setting-control select:focus { border-color: #5c9ab8; outline: none; }
 .setting-control select:disabled { opacity: .45; }
