@@ -147,6 +147,7 @@ h1 { margin: 4px 0 0; font-family: "Arial Narrow", "Segoe UI", sans-serif; font-
 .settings-group h2 { margin: 0 0 6px 2px; color: #aaa; font-size: 9px; font-weight: 600; letter-spacing: 1.25px; text-transform: uppercase; }
 .settings-list { padding: 0 16px; }
 .path-setting, .setting-row { padding: 12px 0; border-bottom: 1px solid #3a3a3a; }
+.setting-row.related-setting-row { border-bottom: 0; }
 .setting-row:last-child { border-bottom: 0; }
 .path-setting label { display: block; margin-bottom: 7px; color: #d1d1d1; font-size: 10px; }
 .path-row { display: flex; gap: 8px; }

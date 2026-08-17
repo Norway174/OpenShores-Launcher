@@ -13,6 +13,7 @@ window.launcher = {
   getPatchReleases: () => invoke('get_ip_patch_releases'),
   setPatchRelease: selection => invoke('set_ip_patch_release', { selection }),
   setDeveloperMode: enabled => invoke('set_developer_mode', { enabled }),
+  setPostLaunchAction: (process, action) => invoke('set_post_launch_action', { process, action }),
   setTheme: themeId => invoke('set_theme', { themeId }),
   importThemeFile: () => invoke('import_theme_file'),
   importThemeUrl: url => invoke('import_theme_url', { url }),
@@ -33,6 +34,8 @@ window.launcher = {
   launch: () => invoke('launch_game'),
   launchOfflineDesigner: mode => invoke('launch_offline_designer', { mode }),
   stopProcess: process => invoke('stop_game_process', { process }),
+  minimizeLauncher: () => invoke('minimize_launcher'),
+  exitLauncher: () => invoke('exit_launcher'),
   openFolder: () => invoke('open_folder'),
   openLink: url => invoke('open_link', { url }),
   checkUpdates: () => invoke('check_updates'),
@@ -645,6 +648,11 @@ function render(nextState = state) {
   if (!state.developerMode && $('#log-tab').classList.contains('active')) switchView('home');
   $('#developer-mode').checked = !!state.developerMode;
   $('#developer-mode').disabled = busy;
+  $('#game-launch-action').value = state.gameLaunchAction || 'do_nothing';
+  $('#designer-launch-action').value = state.designerLaunchAction || 'do_nothing';
+  $('#game-launch-action').disabled = busy;
+  $('#designer-launch-action').disabled = busy;
+  $('#game-launch-open-logs').hidden = !state.developerMode;
   renderThemeControls();
   $('#choose-folder').disabled = busy || anyProcessRunning;
   $('#choose-folder').textContent = state.installed ? 'Move…' : 'Browse…';
@@ -716,6 +724,11 @@ async function launchProcess(process, operation) {
   render();
   try {
     state = { ...state, ...(await operation()) };
+    try {
+      await applyPostLaunchAction(process);
+    } catch (error) {
+      showError(`The process started, but the selected launcher action failed: ${error?.message || String(error)}`);
+    }
   } catch (error) {
     showError(error);
     try {
@@ -914,6 +927,13 @@ function switchView(viewName) {
     renderLog(true);
     readClientLog(true);
   }
+}
+
+async function applyPostLaunchAction(process) {
+  const action = process === 'designer' ? state.designerLaunchAction : state.gameLaunchAction;
+  if (action === 'open_logs' && state.developerMode) switchView('log');
+  else if (action === 'minimize') await window.launcher.minimizeLauncher();
+  else if (action === 'exit') await window.launcher.exitLauncher();
 }
 
 document.querySelectorAll('.nav-item').forEach(button => button.addEventListener('click', () => {
@@ -1262,6 +1282,13 @@ $('#developer-mode').addEventListener('change', event => {
   state = { ...state, developerMode: enabled };
   runOperation(() => window.launcher.setDeveloperMode(enabled), false);
 });
+for (const [selector, process] of [['#game-launch-action', 'game'], ['#designer-launch-action', 'designer']]) {
+  $(selector).addEventListener('change', event => {
+    const action = event.currentTarget.value;
+    state = { ...state, [process === 'game' ? 'gameLaunchAction' : 'designerLaunchAction']: action };
+    runOperation(() => window.launcher.setPostLaunchAction(process, action), false);
+  });
+}
 $('#theme-picker-button').addEventListener('click', event => {
   event.stopPropagation();
   const picker = $('#theme-picker');

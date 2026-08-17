@@ -62,6 +62,10 @@ const DEFAULT_SERVER_HOST: &str = "play.openshores.net";
 const WINE_NAME: &str = "wine";
 const DEFAULT_DARK_THEME: &str = "default-dark";
 const DEFAULT_LIGHT_THEME: &str = "default-light";
+const POST_LAUNCH_DO_NOTHING: &str = "do_nothing";
+const POST_LAUNCH_MINIMIZE: &str = "minimize";
+const POST_LAUNCH_EXIT: &str = "exit";
+const POST_LAUNCH_OPEN_LOGS: &str = "open_logs";
 const MAX_THEME_SIZE: usize = 1024 * 1024;
 const DEFAULT_DARK_CSS: &str = include_str!("../../src/renderer/styles.css");
 
@@ -128,6 +132,10 @@ struct LauncherConfig {
     developer_mode: bool,
     #[serde(rename = "selectedTheme", default = "default_theme")]
     selected_theme: String,
+    #[serde(rename = "gameLaunchAction", default = "default_post_launch_action")]
+    game_launch_action: String,
+    #[serde(rename = "designerLaunchAction", default = "default_post_launch_action")]
+    designer_launch_action: String,
 }
 
 impl Default for LauncherConfig {
@@ -141,6 +149,8 @@ impl Default for LauncherConfig {
             accounts: Vec::new(),
             developer_mode: false,
             selected_theme: default_theme(),
+            game_launch_action: default_post_launch_action(),
+            designer_launch_action: default_post_launch_action(),
         }
     }
 }
@@ -151,6 +161,10 @@ fn default_theme() -> String {
 
 fn default_patch_release() -> String {
     LATEST_PATCH_RELEASE.to_string()
+}
+
+fn default_post_launch_action() -> String {
+    POST_LAUNCH_DO_NOTHING.to_string()
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -225,6 +239,8 @@ struct LauncherSnapshot {
     account_username: Option<String>,
     developer_mode: bool,
     selected_theme: String,
+    game_launch_action: String,
+    designer_launch_action: String,
     themes: Vec<ThemeOption>,
     theme_css: String,
 }
@@ -592,6 +608,21 @@ fn load_config() -> LauncherResult<LauncherConfig> {
         config.servers = Some(vec![default_server()]);
         changed = true;
     }
+    if !matches!(
+        config.game_launch_action.as_str(),
+        POST_LAUNCH_DO_NOTHING | POST_LAUNCH_MINIMIZE | POST_LAUNCH_EXIT | POST_LAUNCH_OPEN_LOGS
+    ) || (!config.developer_mode && config.game_launch_action == POST_LAUNCH_OPEN_LOGS)
+    {
+        config.game_launch_action = default_post_launch_action();
+        changed = true;
+    }
+    if !matches!(
+        config.designer_launch_action.as_str(),
+        POST_LAUNCH_DO_NOTHING | POST_LAUNCH_MINIMIZE | POST_LAUNCH_EXIT
+    ) {
+        config.designer_launch_action = default_post_launch_action();
+        changed = true;
+    }
     let server_ids: Vec<String> = config
         .servers
         .as_ref()
@@ -643,6 +674,27 @@ fn save_patch_selection(selection: String) -> LauncherResult<LauncherConfig> {
 fn save_developer_mode(enabled: bool) -> LauncherResult<()> {
     let mut config = load_config()?;
     config.developer_mode = enabled;
+    if !enabled && config.game_launch_action == POST_LAUNCH_OPEN_LOGS {
+        config.game_launch_action = default_post_launch_action();
+    }
+    write_json(&config_path()?, &config)
+}
+
+fn save_post_launch_action(process: &str, action: String) -> LauncherResult<()> {
+    let mut config = load_config()?;
+    let common_action = matches!(
+        action.as_str(),
+        POST_LAUNCH_DO_NOTHING | POST_LAUNCH_MINIMIZE | POST_LAUNCH_EXIT
+    );
+    match process {
+        "game" if common_action || (action == POST_LAUNCH_OPEN_LOGS && config.developer_mode) => {
+            config.game_launch_action = action;
+        }
+        "designer" if common_action => config.designer_launch_action = action,
+        "game" => return Err("Open Logs requires Developer mode.".to_string()),
+        "designer" => return Err("Unknown Designer launch action.".to_string()),
+        _ => return Err("Unknown launch process.".to_string()),
+    }
     write_json(&config_path()?, &config)
 }
 
@@ -714,6 +766,8 @@ fn get_snapshot(state: &AppState) -> LauncherResult<LauncherSnapshot> {
         account_username,
         developer_mode: config.developer_mode,
         selected_theme: config.selected_theme,
+        game_launch_action: config.game_launch_action,
+        designer_launch_action: config.designer_launch_action,
         themes,
         theme_css,
     })
@@ -2667,6 +2721,16 @@ fn set_developer_mode(state: State<'_, AppState>, enabled: bool) -> LauncherResu
     get_snapshot(state.inner())
 }
 
+#[tauri::command]
+fn set_post_launch_action(
+    state: State<'_, AppState>,
+    process: String,
+    action: String,
+) -> LauncherResult<LauncherSnapshot> {
+    save_post_launch_action(&process, action)?;
+    get_snapshot(state.inner())
+}
+
 fn unique_theme_file_name(requested: &str) -> LauncherResult<String> {
     let source_stem = Path::new(requested)
         .file_stem()
@@ -3394,6 +3458,19 @@ fn stop_game_process(
 }
 
 #[tauri::command]
+fn minimize_launcher(app: AppHandle) -> LauncherResult<()> {
+    app.get_webview_window("main")
+        .ok_or_else(|| "Launcher window is unavailable.".to_string())?
+        .minimize()
+        .map_err(error_string)
+}
+
+#[tauri::command]
+fn exit_launcher(app: AppHandle) {
+    app.exit(0);
+}
+
+#[tauri::command]
 fn open_folder() -> LauncherResult<()> {
     let path = PathBuf::from(load_config()?.install_path.unwrap());
     open::that(path).map_err(error_string)
@@ -3580,6 +3657,7 @@ fn main() {
             get_ip_patch_releases,
             set_ip_patch_release,
             set_developer_mode,
+            set_post_launch_action,
             set_theme,
             import_theme_file,
             import_theme_url,
@@ -3606,6 +3684,8 @@ fn main() {
             launch_game,
             launch_offline_designer,
             stop_game_process,
+            minimize_launcher,
+            exit_launcher,
             open_folder,
             open_link,
             check_updates,
@@ -3815,6 +3895,8 @@ mod tests {
         assert_eq!(config.ip_patch_release, LATEST_PATCH_RELEASE);
         assert_eq!(config.applied_ip_patch_release, None);
         assert_eq!(config.servers, None);
+        assert_eq!(config.game_launch_action, POST_LAUNCH_DO_NOTHING);
+        assert_eq!(config.designer_launch_action, POST_LAUNCH_DO_NOTHING);
 
         let saved = LauncherConfig {
             applied_ip_patch_release: Some("r4".to_string()),
