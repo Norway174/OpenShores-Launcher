@@ -13,6 +13,12 @@ window.launcher = {
   getPatchReleases: () => invoke('get_ip_patch_releases'),
   setPatchRelease: selection => invoke('set_ip_patch_release', { selection }),
   setDeveloperMode: enabled => invoke('set_developer_mode', { enabled }),
+  setTheme: themeId => invoke('set_theme', { themeId }),
+  importThemeFile: () => invoke('import_theme_file'),
+  importThemeUrl: url => invoke('import_theme_url', { url }),
+  deleteTheme: themeId => invoke('delete_theme', { themeId }),
+  openThemeEditor: themeId => invoke('open_theme_editor', { themeId }),
+  finishThemeElementPicker: selector => invoke('finish_theme_element_picker', { selector }),
   updatePatch: () => invoke('update_ip_patch'),
   uninstall: () => invoke('uninstall_game'),
   addServer: (nickname, host) => invoke('add_server', { nickname, host }),
@@ -38,6 +44,9 @@ window.launcher = {
   onOperationStatus: callback => listen('operation-status', event => callback(event.payload)),
   onGameStatus: callback => listen('game-status', event => callback(event.payload)),
   onStateChanged: callback => listen('state-changed', event => callback(event.payload)),
+  onThemeElementPickerStart: callback => listen('theme-element-picker-start', callback),
+  onThemeCssPreview: callback => listen('theme-css-preview', event => callback(event.payload)),
+  onThemeCssPreviewClear: callback => listen('theme-css-preview-clear', callback),
   onUpdaterStatus: callback => listen('updater-status', event => callback(event.payload))
 };
 let state = null;
@@ -76,6 +85,181 @@ let linuxState = {
 function connectedServer() {
   return state?.servers?.find(server => server.id === state.connectedServerId) || null;
 }
+let appliedThemeKey = null;
+let appliedThemeUrl = null;
+let themePreviewCss = null;
+
+function applyTheme(themeId, css) {
+  const key = `${themeId}\0${css}`;
+  if (key === appliedThemeKey) return;
+  appliedThemeKey = key;
+  const oldLink = $('#active-theme-stylesheet');
+  if (oldLink) oldLink.remove();
+  if (appliedThemeUrl) URL.revokeObjectURL(appliedThemeUrl);
+  appliedThemeUrl = null;
+  document.documentElement.dataset.theme = themeId || 'default-dark';
+  if (!css) return;
+  appliedThemeUrl = URL.createObjectURL(new Blob([css], { type: 'text/css' }));
+  const link = document.createElement('link');
+  link.id = 'active-theme-stylesheet';
+  link.rel = 'stylesheet';
+  link.href = appliedThemeUrl;
+  document.head.appendChild(link);
+}
+
+function closeThemeMenus() {
+  $('#theme-picker').classList.remove('open');
+  $('#theme-picker-menu').hidden = true;
+  $('#theme-picker-button').setAttribute('aria-expanded', 'false');
+  $('#theme-import').classList.remove('open');
+  $('#theme-import-menu').hidden = true;
+  $('#theme-import-button').setAttribute('aria-expanded', 'false');
+}
+
+function renderThemeControls() {
+  const themes = state.themes || [];
+  const selected = themes.find(theme => theme.id === state.selectedTheme) || themes[0];
+  $('#theme-picker-label').textContent = selected?.name || 'Default Dark [SYSTEM]';
+  $('#edit-theme').disabled = busy || !selected || selected.builtIn;
+  $('#new-theme').disabled = busy;
+  $('#theme-import-button').disabled = busy;
+  $('#theme-picker-button').disabled = busy;
+  const menu = $('#theme-picker-menu');
+  menu.replaceChildren();
+  for (const theme of themes) {
+    const row = document.createElement('div');
+    row.className = 'theme-option-row';
+    const option = document.createElement('button');
+    option.type = 'button';
+    option.className = 'theme-option';
+    option.setAttribute('role', 'option');
+    option.setAttribute('aria-selected', String(theme.id === state.selectedTheme));
+    option.textContent = theme.name;
+    option.addEventListener('click', () => {
+      closeThemeMenus();
+      if (theme.id !== state.selectedTheme) runOperation(() => window.launcher.setTheme(theme.id), false);
+    });
+    row.appendChild(option);
+    if (!theme.builtIn) {
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'theme-delete';
+      remove.setAttribute('aria-label', `Delete ${theme.name}`);
+      remove.title = `Delete ${theme.name}`;
+      remove.textContent = '×';
+      remove.addEventListener('click', () => {
+        closeThemeMenus();
+        if (window.confirm(`Delete the “${theme.name}” theme? This cannot be undone.`)) {
+          runOperation(() => window.launcher.deleteTheme(theme.id), false);
+        }
+      });
+      row.appendChild(remove);
+    }
+    menu.appendChild(row);
+  }
+}
+
+let themeElementPickerActive = false;
+let themeElementPickerHover = null;
+let themeElementPickerNotice = null;
+
+function escapeCssIdentifier(value) {
+  if (window.CSS?.escape) return window.CSS.escape(value);
+  return value.replace(/[^a-zA-Z0-9_-]/g, character => `\\${character}`);
+}
+
+function selectorForElement(element) {
+  if (element.id) return `#${escapeCssIdentifier(element.id)}`;
+  const ignoredClasses = new Set([
+    'active', 'hidden', 'open', 'loading', 'checking', 'pending', 'updating',
+    'process-running', 'theme-element-picker-hover', 'theme-element-picker-active'
+  ]);
+  const segments = [];
+  let current = element;
+  while (current && current !== document.documentElement) {
+    if (current.id) {
+      segments.unshift(`#${escapeCssIdentifier(current.id)}`);
+      break;
+    }
+    let segment = current.tagName.toLowerCase();
+    const classes = [...current.classList]
+      .filter(className => !ignoredClasses.has(className))
+      .slice(0, 3);
+    if (classes.length) segment += classes.map(className => `.${escapeCssIdentifier(className)}`).join('');
+    const parent = current.parentElement;
+    if (parent) {
+      const matchingSiblings = [...parent.children].filter(sibling => sibling.matches(segment));
+      if (matchingSiblings.length > 1) {
+        const sameTag = [...parent.children].filter(sibling => sibling.tagName === current.tagName);
+        segment += `:nth-of-type(${sameTag.indexOf(current) + 1})`;
+      }
+    }
+    segments.unshift(segment);
+    const candidate = segments.join(' > ');
+    try {
+      if (document.querySelectorAll(candidate).length === 1) return candidate;
+    } catch (_) {
+      // Continue toward a uniquely identifiable ancestor.
+    }
+    current = parent;
+  }
+  return segments.join(' > ');
+}
+
+function clearThemeElementPicker() {
+  if (!themeElementPickerActive) return;
+  themeElementPickerActive = false;
+  themeElementPickerHover?.classList.remove('theme-element-picker-hover');
+  themeElementPickerHover = null;
+  themeElementPickerNotice?.remove();
+  themeElementPickerNotice = null;
+  document.documentElement.classList.remove('theme-element-picker-active');
+  document.removeEventListener('mouseover', handleThemePickerHover, true);
+  document.removeEventListener('click', handleThemePickerClick, true);
+  document.removeEventListener('keydown', handleThemePickerKeydown, true);
+}
+
+function handleThemePickerHover(event) {
+  const target = event.target instanceof Element ? event.target : null;
+  if (!target || target === themeElementPickerHover || target === themeElementPickerNotice) return;
+  themeElementPickerHover?.classList.remove('theme-element-picker-hover');
+  themeElementPickerHover = target;
+  target.classList.add('theme-element-picker-hover');
+}
+
+function handleThemePickerClick(event) {
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  const target = event.target instanceof Element ? event.target : themeElementPickerHover;
+  if (!target) return;
+  const selector = selectorForElement(target);
+  clearThemeElementPicker();
+  window.launcher.finishThemeElementPicker(selector).catch(showError);
+}
+
+function handleThemePickerKeydown(event) {
+  if (event.key !== 'Escape') return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  clearThemeElementPicker();
+  window.launcher.finishThemeElementPicker(null).catch(showError);
+}
+
+function beginThemeElementPicker() {
+  clearThemeElementPicker();
+  closeThemeMenus();
+  themeElementPickerActive = true;
+  document.documentElement.classList.add('theme-element-picker-active');
+  themeElementPickerNotice = document.createElement('div');
+  themeElementPickerNotice.className = 'theme-element-picker-notice';
+  themeElementPickerNotice.textContent = 'Select an element for your theme · Esc to cancel';
+  document.body.appendChild(themeElementPickerNotice);
+  document.addEventListener('mouseover', handleThemePickerHover, true);
+  document.addEventListener('click', handleThemePickerClick, true);
+  document.addEventListener('keydown', handleThemePickerKeydown, true);
+}
+
+window.launcher.onThemeElementPickerStart(beginThemeElementPicker);
 
 function appendSearchHighlights(target, text, filter) {
   if (!filter) {
@@ -438,6 +622,7 @@ function openDesignerMenu() {
 function render(nextState = state) {
   if (!nextState) return;
   state = nextState;
+  applyTheme(themePreviewCss === null ? state.selectedTheme : 'theme-preview', themePreviewCss ?? state.themeCss ?? '');
   $('.version').textContent = `v${state.launcherVersion}`;
   $('#section-nav').classList.remove('hidden');
   $('#startup-placeholder').classList.add('hidden');
@@ -460,6 +645,7 @@ function render(nextState = state) {
   if (!state.developerMode && $('#log-tab').classList.contains('active')) switchView('home');
   $('#developer-mode').checked = !!state.developerMode;
   $('#developer-mode').disabled = busy;
+  renderThemeControls();
   $('#choose-folder').disabled = busy || anyProcessRunning;
   $('#choose-folder').textContent = state.installed ? 'Move…' : 'Browse…';
   renderServers();
@@ -579,6 +765,14 @@ window.launcher.onGameStatus(data => {
 });
 
 window.launcher.onStateChanged(render);
+window.launcher.onThemeCssPreview(css => {
+  themePreviewCss = css;
+  applyTheme('theme-preview', css);
+});
+window.launcher.onThemeCssPreviewClear(() => {
+  themePreviewCss = null;
+  if (state) applyTheme(state.selectedTheme, state.themeCss || '');
+});
 
 function handleUpdaterStatus(data) {
   if (data.state === 'available') {
@@ -722,7 +916,12 @@ function switchView(viewName) {
   }
 }
 
-document.querySelectorAll('.nav-item').forEach(button => button.addEventListener('click', () => switchView(button.dataset.view)));
+document.querySelectorAll('.nav-item').forEach(button => button.addEventListener('click', () => {
+  switchView(button.dataset.view);
+  if (button.dataset.view === 'settings') {
+    window.launcher.getState().then(render).catch(showError);
+  }
+}));
 
 function showServerDialog(server = null) {
   $('#server-edit-id').value = server?.id || '';
@@ -1063,8 +1262,50 @@ $('#developer-mode').addEventListener('change', event => {
   state = { ...state, developerMode: enabled };
   runOperation(() => window.launcher.setDeveloperMode(enabled), false);
 });
+$('#theme-picker-button').addEventListener('click', event => {
+  event.stopPropagation();
+  const picker = $('#theme-picker');
+  const opening = !picker.classList.contains('open');
+  closeThemeMenus();
+  if (opening) {
+    picker.classList.add('open');
+    $('#theme-picker-menu').hidden = false;
+    $('#theme-picker-button').setAttribute('aria-expanded', 'true');
+    $('#theme-picker-menu .theme-option')?.focus();
+  }
+});
+$('#theme-import-button').addEventListener('click', event => {
+  event.stopPropagation();
+  const importer = $('#theme-import');
+  const opening = !importer.classList.contains('open');
+  closeThemeMenus();
+  if (opening) {
+    importer.classList.add('open');
+    $('#theme-import-menu').hidden = false;
+    $('#theme-import-button').setAttribute('aria-expanded', 'true');
+    $('#import-theme-file').focus();
+  }
+});
+$('#import-theme-file').addEventListener('click', () => {
+  closeThemeMenus();
+  runOperation(() => window.launcher.importThemeFile(), false);
+});
+$('#import-theme-url').addEventListener('click', () => {
+  closeThemeMenus();
+  const url = window.prompt('Enter the URL of a CSS theme:');
+  if (url?.trim()) runOperation(() => window.launcher.importThemeUrl(url.trim()), false);
+});
+$('#new-theme').addEventListener('click', () => window.launcher.openThemeEditor(null).catch(showError));
+$('#edit-theme').addEventListener('click', () => {
+  const selected = state?.themes?.find(theme => theme.id === state.selectedTheme);
+  if (selected && !selected.builtIn) window.launcher.openThemeEditor(selected.id).catch(showError);
+});
+document.addEventListener('click', event => {
+  if (!event.target.closest('.theme-picker, .theme-import')) closeThemeMenus();
+});
 document.addEventListener('keydown', event => {
   if (event.key === 'Escape') {
+    closeThemeMenus();
     closeServerDialog();
     closeStopModal();
   }

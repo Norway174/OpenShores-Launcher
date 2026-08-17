@@ -12,8 +12,8 @@
     "withGlobalTauri": true,
     "windows": [],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' asset: data:; style-src 'self'; script-src 'self'; connect-src ipc: http://ipc.localhost",
-      "devCsp": "default-src 'self'; img-src 'self' asset: data:; style-src 'self'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:1420 ws://127.0.0.1:1420"
+      "csp": "default-src 'self'; img-src 'self' asset: data:; style-src 'self' blob:; script-src 'self'; connect-src ipc: http://ipc.localhost",
+      "devCsp": "default-src 'self'; img-src 'self' asset: data:; style-src 'self' blob:; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:1420 ws://127.0.0.1:1420"
     }
   },
   "bundle": {

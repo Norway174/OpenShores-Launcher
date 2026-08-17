@@ -175,6 +175,25 @@ h1 { margin: 4px 0 0; font-family: "Arial Narrow", "Segoe UI", sans-serif; font-
 .setting-control select:disabled { opacity: .45; }
 .setting-control select.disabled-selection { border-color: #9a7044; color: #f2b36b; }
 .setting-control select option.patch-option-disabled { color: #f2b36b; font-weight: 600; }
+.theme-setting-row { align-items: flex-start; }
+.theme-controls { width: min(430px, 62%); display: flex; flex-direction: column; gap: 8px; }
+.theme-picker, .theme-import { position: relative; }
+.theme-picker-button, .split-button { width: 100%; height: 34px; display: flex; align-items: stretch; padding: 0; border: 1px solid #555; border-radius: 2px; color: #ddd; background: #292929; cursor: pointer; font: inherit; font-size: 10px; text-align: left; }
+.theme-picker-button:hover, .split-button:hover, .theme-picker.open .theme-picker-button, .theme-import.open .split-button { border-color: #777; background: #383838; }
+.theme-picker-button > span:first-child, .split-button > span:first-child { min-width: 0; flex: 1; display: flex; align-items: center; padding: 0 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.theme-picker-button .dropdown-caret, .split-button .dropdown-caret { width: 34px; flex: 0 0 34px; }
+.theme-picker-menu, .theme-import-menu { position: absolute; z-index: 50; top: calc(100% + 4px); right: 0; left: 0; overflow: hidden; padding: 4px; border: 1px solid #555; border-radius: 2px; color: #ddd; background: #242424; box-shadow: 0 9px 24px rgba(0, 0, 0, .48); }
+.theme-picker-menu[hidden], .theme-import-menu[hidden] { display: none; }
+.theme-option-row { display: flex; align-items: stretch; }
+.theme-option { min-width: 0; min-height: 32px; flex: 1; overflow: hidden; padding: 0 9px; border: 0; color: inherit; background: transparent; cursor: pointer; font-size: 10px; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
+.theme-option:hover, .theme-option:focus-visible, .theme-option[aria-selected="true"] { outline: 0; color: #fff; background: #3b3b3b; }
+.theme-delete { width: 32px; min-height: 32px; flex: 0 0 32px; padding: 0; border: 0; color: #929292; background: transparent; cursor: pointer; font-size: 17px; line-height: 1; }
+.theme-delete:hover, .theme-delete:focus-visible { outline: 0; color: #ffc1c1; background: #552626; }
+.theme-actions { display: grid; grid-template-columns: minmax(138px, 1.35fr) 1fr 1fr; gap: 7px; }
+.theme-actions > button, .theme-actions .secondary { min-width: 0; min-height: 32px; padding: 0 10px; font-size: 9px; }
+.theme-import-menu { min-width: 160px; }
+.theme-import-menu button { width: 100%; min-height: 32px; display: block; padding: 0 9px; border: 0; color: inherit; background: transparent; cursor: pointer; font: inherit; font-size: 10px; text-align: left; }
+.theme-import-menu button:hover, .theme-import-menu button:focus-visible { outline: 0; color: #fff; background: #3b3b3b; }
 .links { display: flex; align-items: center; gap: 18px; margin-top: 9px; }
 .links button { padding: 0; font-size: 9px; }
 .creator-credit { margin-left: auto; color: #737373; font-size: 9px; }
@@ -278,6 +297,9 @@ h1 { margin: 4px 0 0; font-family: "Arial Narrow", "Segoe UI", sans-serif; font-
 .field-help { margin: 7px 0 0; color: #7f7f7f; font-size: 8px; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
 .hidden { display: none !important; }
+.theme-element-picker-active, .theme-element-picker-active * { cursor: crosshair !important; }
+.theme-element-picker-hover { outline: 2px solid #53bdf0 !important; outline-offset: -2px !important; box-shadow: 0 0 0 2px rgba(20, 71, 94, .72) !important; }
+.theme-element-picker-notice { position: fixed; z-index: 10000; top: 10px; left: 50%; padding: 8px 12px; border: 1px solid #65bfe8; border-radius: 3px; color: #eefaff; background: rgba(20, 48, 62, .96); box-shadow: 0 6px 20px rgba(0, 0, 0, .4); font-size: 10px; letter-spacing: .2px; pointer-events: none; transform: translateX(-50%); }
 @media (max-width: 740px) {
   .overview-grid { grid-template-columns: 1fr; }
   .quick-info { display: none; }

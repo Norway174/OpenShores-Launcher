@@ -146,6 +146,23 @@
             <h2>Launcher settings</h2>
             <div class="settings-list">
               <div class="setting-row"><div><strong>Launcher updates</strong><p>Check the GitHub releases feed for a newer launcher.</p><p id="update-check-result" class="update-check-result hidden" role="status" aria-live="polite"></p></div><span class="update-button-wrap" data-tooltip=""><button id="check-updates" class="secondary update-task-button"><span class="button-label">Check now</span><span class="button-progress"></span></button></span></div>
+              <div class="setting-row theme-setting-row">
+                <div><strong>Theme</strong><p>Choose a built-in theme or customize the launcher with CSS.</p></div>
+                <div class="theme-controls">
+                  <div id="theme-picker" class="theme-picker">
+                    <button id="theme-picker-button" class="theme-picker-button" type="button" aria-haspopup="listbox" aria-expanded="false"><span id="theme-picker-label">Default Dark [SYSTEM]</span><span class="dropdown-caret" aria-hidden="true">▾</span></button>
+                    <div id="theme-picker-menu" class="theme-picker-menu" role="listbox" aria-label="Launcher theme" hidden></div>
+                  </div>
+                  <div class="theme-actions">
+                    <div id="theme-import" class="theme-import">
+                      <button id="theme-import-button" class="secondary split-button" type="button" aria-haspopup="menu" aria-expanded="false"><span>Import Theme…</span><span class="dropdown-caret" aria-hidden="true">▾</span></button>
+                      <div id="theme-import-menu" class="theme-import-menu" role="menu" hidden><button id="import-theme-file" role="menuitem" type="button">Import from File</button><button id="import-theme-url" role="menuitem" type="button">Download from URL</button></div>
+                    </div>
+                    <button id="new-theme" class="secondary" type="button">New Theme</button>
+                    <button id="edit-theme" class="secondary" type="button" disabled>Edit Theme</button>
+                  </div>
+                </div>
+              </div>
               <div class="setting-row"><div><strong>Developer</strong><p>Enable launcher features intended for developers.</p></div><label class="toggle-switch" for="developer-mode"><input id="developer-mode" type="checkbox" role="switch"><span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span></label></div>
             </div>
           </div>

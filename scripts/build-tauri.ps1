@@ -9,7 +9,9 @@ $artifact = Join-Path $distPath 'OpenShores-Launcher.exe'
 
 if (-not (Test-Path -LiteralPath $cargo)) { throw 'Rust is not installed. Install the stable MSVC Rust toolchain first.' }
 
-& $cargo build --release --manifest-path $manifest
+# Tauri's custom-protocol feature embeds frontendDist instead of loading devUrl.
+# Enabling it explicitly keeps production builds independent of the Tauri CLI.
+& $cargo build --release --manifest-path $manifest --features tauri/custom-protocol
 if ($LASTEXITCODE -ne 0) { throw "Tauri build failed with exit code $LASTEXITCODE." }
 if (-not (Test-Path -LiteralPath $builtExecutable)) { throw "Tauri did not create $builtExecutable." }
 

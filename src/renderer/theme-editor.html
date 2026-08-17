@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OpenShores Theme Editor</title>
+  <link rel="stylesheet" href="theme-editor.css">
+</head>
+<body>
+  <main class="editor-shell">
+    <header>
+      <div><span class="kicker">CUSTOM THEME</span><h1 id="editor-title">New Theme</h1></div>
+      <label for="theme-name">Theme name<input id="theme-name" type="text" maxlength="120" spellcheck="false" autocomplete="off"></label>
+    </header>
+    <div class="editor-toolbar">
+      <div class="editor-help">CSS is layered on top of Default Dark. Override variables or any launcher selector.</div>
+    </div>
+    <div class="code-editor">
+      <div id="line-numbers" aria-hidden="true"><div id="line-number-content"></div></div>
+      <pre id="theme-highlight" aria-hidden="true"><code></code></pre>
+      <textarea id="theme-css" aria-label="Theme CSS" spellcheck="false" wrap="off"></textarea>
+      <div id="color-swatches"></div>
+    </div>
+    <footer>
+      <span id="editor-status" role="status" aria-live="polite">Ctrl+S to save</span>
+      <button id="select-element" class="secondary select-element" type="button">Select Launcher Element</button>
+      <button id="cancel-theme" class="secondary" type="button">Cancel</button>
+      <button id="save-theme" class="primary" type="button">Save Theme</button>
+    </footer>
+  </main>
+  <script src="theme-editor.js"></script>
+</body>
+</html>

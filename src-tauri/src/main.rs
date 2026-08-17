@@ -60,6 +60,10 @@ const XDELTA_TIMEOUT: Duration = Duration::from_secs(120);
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const DEFAULT_SERVER_HOST: &str = "play.openshores.net";
 const WINE_NAME: &str = "wine";
+const DEFAULT_DARK_THEME: &str = "default-dark";
+const DEFAULT_LIGHT_THEME: &str = "default-light";
+const MAX_THEME_SIZE: usize = 1024 * 1024;
+const DEFAULT_DARK_CSS: &str = include_str!("../../src/renderer/styles.css");
 
 // OS-specific constants
 #[cfg(windows)]
@@ -122,6 +126,8 @@ struct LauncherConfig {
     accounts: Vec<SavedAccount>,
     #[serde(rename = "developerMode", default)]
     developer_mode: bool,
+    #[serde(rename = "selectedTheme", default = "default_theme")]
+    selected_theme: String,
 }
 
 impl Default for LauncherConfig {
@@ -134,8 +140,13 @@ impl Default for LauncherConfig {
             connected_server_id: None,
             accounts: Vec::new(),
             developer_mode: false,
+            selected_theme: default_theme(),
         }
     }
+}
+
+fn default_theme() -> String {
+    DEFAULT_DARK_THEME.to_string()
 }
 
 fn default_patch_release() -> String {
@@ -213,6 +224,25 @@ struct LauncherSnapshot {
     connected_server_id: Option<String>,
     account_username: Option<String>,
     developer_mode: bool,
+    selected_theme: String,
+    themes: Vec<ThemeOption>,
+    theme_css: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ThemeOption {
+    id: String,
+    name: String,
+    built_in: bool,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ThemeEditorDocument {
+    id: Option<String>,
+    name: String,
+    css: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -332,6 +362,149 @@ fn config_path() -> LauncherResult<PathBuf> {
 
 fn launcher_temp_path() -> LauncherResult<PathBuf> {
     Ok(launcher_data_path()?.join("temp"))
+}
+
+fn custom_themes_path() -> LauncherResult<PathBuf> {
+    Ok(launcher_data_path()?.join("custom_themes"))
+}
+
+fn theme_file_name(id: &str) -> Option<&str> {
+    id.strip_prefix("custom:")
+        .filter(|name| is_safe_theme_file_name(name))
+}
+
+fn is_safe_theme_file_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && name.to_ascii_lowercase().ends_with(".css")
+        && name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, ' ' | '-' | '_' | '.'))
+        && name != ".css"
+        && !name.starts_with('.')
+}
+
+fn theme_file_name_from_name(name: &str) -> LauncherResult<String> {
+    let trimmed = name.trim().trim_end_matches(|character: char| character == '.').trim();
+    let stem = trimmed.strip_suffix(".css").unwrap_or(trimmed).trim();
+    if stem.is_empty() || stem.len() > 120 {
+        return Err("Theme name must contain between 1 and 120 characters.".to_string());
+    }
+    if !stem
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || matches!(character, ' ' | '-' | '_'))
+    {
+        return Err("Theme names may only use letters, numbers, spaces, hyphens, and underscores.".to_string());
+    }
+    Ok(format!("{stem}.css"))
+}
+
+fn theme_name_from_file(file_name: &str) -> String {
+    Path::new(file_name)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or(file_name)
+        .to_string()
+}
+
+fn validate_theme_css(css: &str) -> LauncherResult<()> {
+    if css.len() > MAX_THEME_SIZE {
+        return Err("Themes may not be larger than 1 MB.".to_string());
+    }
+    if css.contains('\0') {
+        return Err("The theme contains invalid null characters.".to_string());
+    }
+    Ok(())
+}
+
+fn list_themes() -> LauncherResult<Vec<ThemeOption>> {
+    let directory = custom_themes_path()?;
+    fs::create_dir_all(&directory).map_err(error_string)?;
+    let mut custom = Vec::new();
+    for entry in fs::read_dir(&directory).map_err(error_string)? {
+        let entry = entry.map_err(error_string)?;
+        let file_name = entry.file_name().to_string_lossy().into_owned();
+        if entry.file_type().map_err(error_string)?.is_file() && is_safe_theme_file_name(&file_name) {
+            custom.push(ThemeOption {
+                id: format!("custom:{file_name}"),
+                name: theme_name_from_file(&file_name),
+                built_in: false,
+            });
+        }
+    }
+    custom.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
+    let mut themes = vec![
+        ThemeOption { id: DEFAULT_DARK_THEME.to_string(), name: "Default Dark [SYSTEM]".to_string(), built_in: true },
+        ThemeOption { id: DEFAULT_LIGHT_THEME.to_string(), name: "Default Light [SYSTEM]".to_string(), built_in: true },
+    ];
+    themes.extend(custom);
+    Ok(themes)
+}
+
+fn read_theme_css(theme_id: &str) -> LauncherResult<String> {
+    match theme_id {
+        DEFAULT_DARK_THEME => Ok(String::new()),
+        DEFAULT_LIGHT_THEME => Ok(include_str!("../../src/renderer/default-light.css").to_string()),
+        _ => {
+            let file_name = theme_file_name(theme_id).ok_or_else(|| "Unknown theme.".to_string())?;
+            let path = custom_themes_path()?.join(file_name);
+            let metadata = fs::metadata(&path).map_err(|_| "The selected theme no longer exists.".to_string())?;
+            if metadata.len() > MAX_THEME_SIZE as u64 {
+                return Err("Themes may not be larger than 1 MB.".to_string());
+            }
+            fs::read_to_string(path).map_err(error_string)
+        }
+    }
+}
+
+fn default_theme_template() -> LauncherResult<String> {
+    let start = DEFAULT_DARK_CSS
+        .find(":root")
+        .ok_or_else(|| "Default Dark does not contain a :root rule.".to_string())?;
+    let open = DEFAULT_DARK_CSS[start..]
+        .find('{')
+        .map(|offset| start + offset)
+        .ok_or_else(|| "Default Dark contains an invalid :root rule.".to_string())?;
+    let bytes = DEFAULT_DARK_CSS.as_bytes();
+    let mut depth = 0_u32;
+    let mut quote = None;
+    let mut escaped = false;
+    let mut in_comment = false;
+    let mut index = open;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        let next = bytes.get(index + 1).copied();
+        if in_comment {
+            if byte == b'*' && next == Some(b'/') {
+                in_comment = false;
+                index += 2;
+                continue;
+            }
+        } else if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == active_quote {
+                quote = None;
+            }
+        } else if byte == b'/' && next == Some(b'*') {
+            in_comment = true;
+            index += 2;
+            continue;
+        } else if byte == b'\'' || byte == b'"' {
+            quote = Some(byte);
+        } else if byte == b'{' {
+            depth += 1;
+        } else if byte == b'}' {
+            depth = depth.saturating_sub(1);
+            if depth == 0 {
+                return Ok(format!("{}\n", DEFAULT_DARK_CSS[start..=index].trim()));
+            }
+        }
+        index += 1;
+    }
+    Err("Default Dark contains an unterminated :root rule.".to_string())
 }
 
 fn default_install_path() -> LauncherResult<PathBuf> {
@@ -473,6 +646,12 @@ fn save_developer_mode(enabled: bool) -> LauncherResult<()> {
     write_json(&config_path()?, &config)
 }
 
+fn save_selected_theme(selected_theme: String) -> LauncherResult<()> {
+    let mut config = load_config()?;
+    config.selected_theme = selected_theme;
+    write_json(&config_path()?, &config)
+}
+
 fn save_applied_patch_release(tag: Option<&str>) -> LauncherResult<()> {
     let mut config = load_config()?;
     config.applied_ip_patch_release = tag.map(str::to_string);
@@ -480,7 +659,13 @@ fn save_applied_patch_release(tag: Option<&str>) -> LauncherResult<()> {
 }
 
 fn get_snapshot(state: &AppState) -> LauncherResult<LauncherSnapshot> {
-    let config = load_config()?;
+    let mut config = load_config()?;
+    let themes = list_themes()?;
+    if !themes.iter().any(|theme| theme.id == config.selected_theme) {
+        config.selected_theme = default_theme();
+        write_json(&config_path()?, &config)?;
+    }
+    let theme_css = read_theme_css(&config.selected_theme)?;
     let install_path = PathBuf::from(
         config
             .install_path
@@ -528,6 +713,9 @@ fn get_snapshot(state: &AppState) -> LauncherResult<LauncherSnapshot> {
         connected_server_id: config.connected_server_id,
         account_username,
         developer_mode: config.developer_mode,
+        selected_theme: config.selected_theme,
+        themes,
+        theme_css,
     })
 }
 
@@ -2479,6 +2667,292 @@ fn set_developer_mode(state: State<'_, AppState>, enabled: bool) -> LauncherResu
     get_snapshot(state.inner())
 }
 
+fn unique_theme_file_name(requested: &str) -> LauncherResult<String> {
+    let source_stem = Path::new(requested)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("Imported Theme");
+    let mut stem: String = source_stem
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, ' ' | '-' | '_') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    stem = stem.trim_matches(|character: char| character == ' ' || character == '-').to_string();
+    if stem.is_empty() {
+        stem = "Imported Theme".to_string();
+    }
+    stem.truncate(110);
+    let requested = format!("{stem}.css");
+    let directory = custom_themes_path()?;
+    fs::create_dir_all(&directory).map_err(error_string)?;
+    if !directory.join(&requested).exists() {
+        return Ok(requested);
+    }
+    let stem = theme_name_from_file(&requested);
+    for suffix in 2..10_000 {
+        let candidate = format!("{stem} - {suffix}.css");
+        if !directory.join(&candidate).exists() {
+            return Ok(candidate);
+        }
+    }
+    Err("Could not find an available theme filename.".to_string())
+}
+
+fn import_theme_css(requested_name: &str, css: String) -> LauncherResult<String> {
+    validate_theme_css(&css)?;
+    let file_name = unique_theme_file_name(requested_name)?;
+    fs::write(custom_themes_path()?.join(&file_name), css).map_err(error_string)?;
+    let id = format!("custom:{file_name}");
+    save_selected_theme(id.clone())?;
+    Ok(id)
+}
+
+#[tauri::command]
+fn set_theme(state: State<'_, AppState>, theme_id: String) -> LauncherResult<LauncherSnapshot> {
+    if !list_themes()?.iter().any(|theme| theme.id == theme_id) {
+        return Err("Unknown theme.".to_string());
+    }
+    save_selected_theme(theme_id)?;
+    get_snapshot(state.inner())
+}
+
+#[tauri::command]
+async fn import_theme_file(state: State<'_, AppState>) -> LauncherResult<Option<LauncherSnapshot>> {
+    let backend = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let selected = rfd::FileDialog::new()
+            .set_title("Import launcher theme")
+            .add_filter("CSS theme", &["css"])
+            .pick_file();
+        let Some(path) = selected else { return Ok(None) };
+        let metadata = fs::metadata(&path).map_err(error_string)?;
+        if metadata.len() > MAX_THEME_SIZE as u64 {
+            return Err("Themes may not be larger than 1 MB.".to_string());
+        }
+        let css = fs::read_to_string(&path).map_err(error_string)?;
+        let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("Imported Theme.css");
+        import_theme_css(name, css)?;
+        get_snapshot(&backend).map(Some)
+    })
+    .await
+    .map_err(error_string)?
+}
+
+#[tauri::command]
+async fn import_theme_url(url: String, state: State<'_, AppState>) -> LauncherResult<LauncherSnapshot> {
+    let backend = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let parsed = Url::parse(url.trim()).map_err(|_| "Enter a valid HTTP or HTTPS URL.".to_string())?;
+        if parsed.scheme() != "https" && parsed.scheme() != "http" {
+            return Err("Theme URLs must use HTTP or HTTPS.".to_string());
+        }
+        let requested_name = parsed
+            .path_segments()
+            .and_then(|mut segments| segments.next_back())
+            .filter(|segment| !segment.is_empty())
+            .unwrap_or("Downloaded Theme.css");
+        let requested_name = if requested_name.to_ascii_lowercase().ends_with(".css") {
+            requested_name.to_string()
+        } else {
+            format!("{requested_name}.css")
+        };
+        let response = http_client()?.get(parsed).send().map_err(error_string)?.error_for_status().map_err(error_string)?;
+        if response.content_length().is_some_and(|length| length > MAX_THEME_SIZE as u64) {
+            return Err("Themes may not be larger than 1 MB.".to_string());
+        }
+        let bytes = response.bytes().map_err(error_string)?;
+        if bytes.len() > MAX_THEME_SIZE {
+            return Err("Themes may not be larger than 1 MB.".to_string());
+        }
+        let css = String::from_utf8(bytes.to_vec()).map_err(|_| "The downloaded theme is not valid UTF-8 CSS.".to_string())?;
+        import_theme_css(&requested_name, css)?;
+        get_snapshot(&backend)
+    })
+    .await
+    .map_err(error_string)?
+}
+
+#[tauri::command]
+fn delete_theme(state: State<'_, AppState>, theme_id: String) -> LauncherResult<LauncherSnapshot> {
+    let file_name = theme_file_name(&theme_id).ok_or_else(|| "Built-in themes cannot be deleted.".to_string())?;
+    let path = custom_themes_path()?.join(file_name);
+    if path.is_file() {
+        fs::remove_file(path).map_err(error_string)?;
+    }
+    if load_config()?.selected_theme == theme_id {
+        save_selected_theme(default_theme())?;
+    }
+    get_snapshot(state.inner())
+}
+
+#[tauri::command]
+async fn open_theme_editor(app: AppHandle, theme_id: Option<String>) -> LauncherResult<()> {
+    if let Some(id) = theme_id.as_deref() {
+        if theme_file_name(id).is_none() {
+            return Err("Only custom themes can be edited.".to_string());
+        }
+    }
+    if let Some(window) = app.get_webview_window("theme-editor") {
+        let _ = window.show();
+        let _ = window.set_focus();
+        return Err("A theme editor is already open. Close it before opening another theme.".to_string());
+    }
+    let url = theme_id
+        .map(|id| {
+            let encoded = id.bytes().fold(String::new(), |mut output, byte| {
+                if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+                    output.push(byte as char);
+                } else {
+                    output.push_str(&format!("%{byte:02X}"));
+                }
+                output
+            });
+            format!("theme-editor.html?theme={encoded}")
+        })
+        .unwrap_or_else(|| "theme-editor.html".to_string());
+    let webview_data = launcher_data_path()?.join("webview");
+    let preview_app = app.clone();
+    let editor = WebviewWindowBuilder::new(&app, "theme-editor", WebviewUrl::App(url.into()))
+        .title("OpenShores Theme Editor")
+        .inner_size(900.0, 680.0)
+        .min_inner_size(640.0, 480.0)
+        .center()
+        .decorations(true)
+        .resizable(true)
+        .closable(true)
+        .data_directory(webview_data)
+        .build()
+        .map_err(error_string)?;
+    editor.on_window_event(move |event| {
+        if matches!(event, tauri::WindowEvent::Destroyed) {
+            let _ = preview_app.emit_to("main", "theme-css-preview-clear", ());
+        }
+    });
+    Ok(())
+}
+
+#[tauri::command]
+async fn close_theme_editor(app: AppHandle) -> LauncherResult<()> {
+    if let Some(window) = app.get_webview_window("theme-editor") {
+        window.close().map_err(error_string)?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn preview_theme_css(app: AppHandle, css: String) -> LauncherResult<()> {
+    validate_theme_css(&css)?;
+    app.emit_to("main", "theme-css-preview", css)
+        .map_err(error_string)
+}
+
+#[tauri::command]
+fn clear_theme_preview(app: AppHandle) -> LauncherResult<()> {
+    app.emit_to("main", "theme-css-preview-clear", ())
+        .map_err(error_string)
+}
+
+#[tauri::command]
+async fn begin_theme_element_picker(app: AppHandle) -> LauncherResult<()> {
+    if app.get_webview_window("theme-editor").is_none() {
+        return Err("The theme editor is not open.".to_string());
+    }
+    let main = app
+        .get_webview_window("main")
+        .ok_or_else(|| "The launcher window is not available.".to_string())?;
+    app.emit_to("main", "theme-element-picker-start", ())
+        .map_err(error_string)?;
+    let _ = main.unminimize();
+    main.show().map_err(error_string)?;
+    main.set_focus().map_err(error_string)
+}
+
+#[tauri::command]
+async fn finish_theme_element_picker(
+    app: AppHandle,
+    selector: Option<String>,
+) -> LauncherResult<()> {
+    let editor = app
+        .get_webview_window("theme-editor")
+        .ok_or_else(|| "The theme editor was closed.".to_string())?;
+    if let Some(selector) = selector {
+        let selector = selector.trim();
+        if selector.is_empty() || selector.len() > 1024 {
+            return Err("The selected CSS selector is invalid.".to_string());
+        }
+        app.emit_to("theme-editor", "theme-element-selected", selector)
+            .map_err(error_string)?;
+    } else {
+        app.emit_to("theme-editor", "theme-element-picker-cancelled", ())
+            .map_err(error_string)?;
+    }
+    let _ = editor.show();
+    editor.set_focus().map_err(error_string)
+}
+
+#[tauri::command]
+fn get_theme_for_edit(theme_id: Option<String>) -> LauncherResult<ThemeEditorDocument> {
+    match theme_id {
+        Some(id) => {
+            let file_name = theme_file_name(&id).ok_or_else(|| "Only custom themes can be edited.".to_string())?;
+            Ok(ThemeEditorDocument {
+                id: Some(id.clone()),
+                name: theme_name_from_file(file_name),
+                css: read_theme_css(&id)?,
+            })
+        }
+        None => Ok(ThemeEditorDocument {
+            id: None,
+            name: "My Theme".to_string(),
+            css: default_theme_template()?,
+        }),
+    }
+}
+
+#[tauri::command]
+fn save_theme(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    original_id: Option<String>,
+    name: String,
+    css: String,
+) -> LauncherResult<LauncherSnapshot> {
+    validate_theme_css(&css)?;
+    let file_name = theme_file_name_from_name(&name)?;
+    let directory = custom_themes_path()?;
+    fs::create_dir_all(&directory).map_err(error_string)?;
+    let target = directory.join(&file_name);
+    let old_file_name = match original_id.as_deref() {
+        Some(id) => Some(theme_file_name(id).ok_or_else(|| "Only custom themes can be edited.".to_string())?),
+        None => None,
+    };
+    if target.exists() && old_file_name != Some(file_name.as_str()) {
+        return Err("A theme with that name already exists.".to_string());
+    }
+    fs::write(&target, css).map_err(error_string)?;
+    if let Some(old_name) = old_file_name {
+        if old_name != file_name {
+            let old_path = directory.join(old_name);
+            if old_path.is_file() {
+                fs::remove_file(old_path).map_err(error_string)?;
+            }
+        }
+    }
+    let new_id = format!("custom:{file_name}");
+    let selected = load_config()?.selected_theme;
+    if original_id.is_none() || original_id.as_deref() == Some(selected.as_str()) {
+        save_selected_theme(new_id)?;
+    }
+    let snapshot = get_snapshot(state.inner())?;
+    let _ = app.emit("state-changed", snapshot.clone());
+    Ok(snapshot)
+}
+
 #[tauri::command]
 async fn update_ip_patch(
     app: AppHandle,
@@ -3106,6 +3580,18 @@ fn main() {
             get_ip_patch_releases,
             set_ip_patch_release,
             set_developer_mode,
+            set_theme,
+            import_theme_file,
+            import_theme_url,
+            delete_theme,
+            open_theme_editor,
+            close_theme_editor,
+            preview_theme_css,
+            clear_theme_preview,
+            begin_theme_element_picker,
+            finish_theme_element_picker,
+            get_theme_for_edit,
+            save_theme,
             update_ip_patch,
             uninstall_game,
             add_server,
@@ -3179,6 +3665,31 @@ mod tests {
                 },
             ],
         }
+    }
+
+    #[test]
+    fn theme_names_create_safe_css_file_names() {
+        assert_eq!(theme_file_name_from_name("Ocean Blue").unwrap(), "Ocean Blue.css");
+        assert_eq!(theme_file_name_from_name("Ocean.css").unwrap(), "Ocean.css");
+        assert!(theme_file_name_from_name("../outside").is_err());
+        assert!(theme_file_name("custom:../outside.css").is_none());
+        assert!(theme_file_name("default-dark").is_none());
+    }
+
+    #[test]
+    fn custom_theme_css_is_size_limited() {
+        assert!(validate_theme_css(":root { --blue: red; }").is_ok());
+        assert!(validate_theme_css("bad\0css").is_err());
+        assert!(validate_theme_css(&"x".repeat(MAX_THEME_SIZE + 1)).is_err());
+    }
+
+    #[test]
+    fn new_theme_template_comes_from_default_dark_root_rule() {
+        let template = default_theme_template().unwrap();
+        assert!(template.starts_with(":root {"));
+        assert!(template.contains("--window: #262626;"));
+        assert!(template.contains("--blue-hover: #3293c2;"));
+        assert!(template.ends_with("}\n"));
     }
 
     #[test]
