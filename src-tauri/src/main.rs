@@ -27,12 +27,19 @@ use std::{
 };
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
+use which::which;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
 #[cfg(windows)]
 use winreg::{enums::HKEY_CURRENT_USER, RegKey};
+
+#[cfg(target_os = "linux")]
+use std::os::unix::process::CommandExt;
+
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::PermissionsExt;
 
 const GAME_MANIFEST_URL: &str = "https://openshores.net/downloads/manifest.json";
 const PATCH_RELEASE_API: &str =
@@ -46,11 +53,21 @@ const MANAGED_BY: &str = "OpenShores Launcher";
 const LATEST_PATCH_RELEASE: &str = "latest";
 const PATCH_ORIGINALS_DIR: &str = ".openshores-patch-originals";
 const XDELTA_TIMEOUT: Duration = Duration::from_secs(120);
-const XDELTA_NAME: &str = "xdelta3-3.0.11-x86_64.exe";
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const DEFAULT_SERVER_HOST: &str = "play.openshores.net";
-const ACCOUNT_REGISTRY_PATH: &str = r"Software\Software Engineering\Shores of Hazeron\Account";
+const WINE_NAME: &str = "wine";
+
+// OS-specific constants
+#[cfg(windows)]
+const XDELTA_NAME: &str = "xdelta3-3.0.11-x86_64.exe";
+#[cfg(windows)]
 const XDELTA_BYTES: &[u8] = include_bytes!("../../resources/xdelta3/xdelta3-3.0.11-x86_64.exe");
+#[cfg(windows)]
+const ACCOUNT_REGISTRY_PATH: &str = r"Software\Software Engineering\Shores of Hazeron\Account";
+#[cfg(target_os = "linux")]
+const XDELTA_NAME: &str = "xdelta3";
+#[cfg(target_os = "linux")]
+const ACCOUNT_REGISTRY_PATH: &str = r"S-1-5-21-0-0-0-1000\Software\Software Engineering\Shores of Hazeron\Account";
 
 type LauncherResult<T> = Result<T, String>;
 
@@ -228,6 +245,11 @@ struct UpdaterStatusPayload {
     state: String,
     message: String,
 }
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PathPayload {
+    path: String
+}
 
 #[derive(Clone, Debug, Deserialize)]
 struct GithubRelease {
@@ -267,10 +289,20 @@ struct GameManifestFile {
     sha256: String,
 }
 
+
+#[cfg(windows)]
 fn local_app_data() -> LauncherResult<PathBuf> {
     env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
         .ok_or_else(|| "Windows Local AppData could not be located.".to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn local_app_data() -> LauncherResult<PathBuf> {
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|mut pb| { pb.push(".local/share"); pb })
+        .ok_or_else(|| "Unix home directory could not be located".to_string())
 }
 
 fn launcher_data_path() -> LauncherResult<PathBuf> {
@@ -604,8 +636,18 @@ fn hazeron_password_value_from_hex(password_sha1: &str) -> LauncherResult<String
                 .map_err(|_| "The saved account password hash is invalid.".to_string())
         })
         .collect::<LauncherResult<Vec<_>>>()?;
-    let payload: String = bytes.into_iter().map(char::from).collect();
-    Ok(format!("@ByteArray({payload})"))
+    let payload: String = unsafe { String::from_utf8_unchecked(bytes) };
+
+    if cfg!(target_os = "linux") {
+        // We need a hex string format to insert this on Linux with `wine REG ADD`.
+        Ok(format!("@ByteArray({payload})")
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{:02x}00", byte))
+            .collect())
+    } else {
+        Ok(format!("@ByteArray({payload})"))
+    }
 }
 
 fn response_error(response: Response, fallback: &str) -> String {
@@ -671,12 +713,73 @@ fn write_game_account_registry(host: &str, account: Option<&SavedAccount>) -> La
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
 fn write_game_account_registry(
-    _host: &str,
+    host: &str,
     account: Option<&SavedAccount>,
 ) -> LauncherResult<bool> {
-    Ok(account.is_some())
+    let key = format!("HKU\\{}", ACCOUNT_REGISTRY_PATH);
+    let wine = which(WINE_NAME).map_err(error_string)?;
+
+    if let Some(account) = account {
+
+        for (value_name, value_type, value) in [
+        (
+            "Host",
+            "REG_SZ",
+            host
+        ),
+        (
+            "Name",
+            "REG_SZ",
+            &account.username
+        ),
+        (
+            "Password",
+            "REG_BINARY",
+            &hazeron_password_value_from_hex(&account.password_sha1)?
+        ),
+        (
+            "SavePass",
+            "REG_DWORD",
+            "1"
+        )
+        ] {
+            let mut command = Command::new(&wine);
+
+            // Use wine REG command to add via CLI
+            command
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit())
+                .args([
+                    "REG",
+                    "ADD",
+                    &key,
+                    "/v", value_name,
+                    "/t", value_type,
+                    "/d", value,
+                    "/f"
+                ]);
+            
+            command.spawn()
+                .map_err(error_string)
+                .map_err(|e| {
+                    format!("wine REG ADD error: {e}")
+                })
+                ?
+                .wait()
+                .map_err(error_string)
+                .map_err(|e| {
+                    format!("wine REG ADD error: {e}")
+                })?;
+            
+        }
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+
 }
 
 fn format_bytes(bytes: u64) -> String {
@@ -1017,6 +1120,7 @@ fn extract_zip(zip_path: &Path, destination: &Path) -> LauncherResult<()> {
     Ok(())
 }
 
+#[cfg(windows)]
 fn ensure_xdelta() -> LauncherResult<PathBuf> {
     let path = launcher_data_path()?
         .join("app")
@@ -1033,6 +1137,12 @@ fn ensure_xdelta() -> LauncherResult<PathBuf> {
         fs::write(&path, XDELTA_BYTES).map_err(error_string)?;
     }
     Ok(path)
+}
+
+#[cfg(target_os = "linux")]
+fn ensure_xdelta() -> LauncherResult<PathBuf> {
+    which(XDELTA_NAME)
+        .map_err(error_string)
 }
 
 fn apply_delta(source: &Path, delta: &Path, output: &Path) -> LauncherResult<()> {
@@ -1605,6 +1715,7 @@ fn launch_game_sync(
     let config = load_config()?;
     let install_path = PathBuf::from(config.install_path.clone().unwrap());
     let executable = install_path.join(GAME_EXE);
+
     if !executable.is_file() {
         return Err("OpenShores is not installed.".to_string());
     }
@@ -1623,7 +1734,19 @@ fn launch_game_sync(
         if pid.is_some() {
             return get_snapshot(state);
         }
-        let mut command = Command::new(&executable);
+
+        // SoH exe needs to be run through Wine on Linux
+        let mut command = if cfg!(target_os = "linux") {
+            let wine = which(WINE_NAME).map_err(error_string)?;
+            
+            let mut wine_command = Command::new(&wine);
+            wine_command.arg(&executable);
+            wine_command
+        } else {
+            Command::new(&executable)
+        };
+
+        
         if let Some(mode) = designer_mode {
             command.arg(designer_launch_argument(mode)?);
         } else if let Some(server_id) = config.connected_server_id.as_deref() {
@@ -1769,10 +1892,11 @@ fn check_updates_sync(
             message: "Launcher is up to date.".to_string(),
         });
     }
+    let binary_name = if cfg!(target_os = "linux") { "OpenShores-Launcher-amd64.AppImage" } else { "OpenShores-Launcher.exe" };
     let asset = release
         .assets
         .iter()
-        .find(|asset| asset.name.eq_ignore_ascii_case("OpenShores-Launcher.exe"))
+        .find(|asset| asset.name.eq_ignore_ascii_case(binary_name))
         .ok_or_else(|| {
             format!("Launcher {release_version} does not include a portable Windows executable.")
         })?;
@@ -2365,6 +2489,21 @@ async fn refresh_server_statuses(state: State<'_, AppState>) -> LauncherResult<L
     .map_err(error_string)?
 }
 
+#[tauri::command]
+async fn check_path(cmd: String, _state: State<'_, AppState>) -> LauncherResult<PathPayload> {
+    if cmd != WINE_NAME && cmd != XDELTA_NAME {
+        return Err("Checking for this command is not allowed.".to_string())
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = which(cmd).map_err(error_string)?;
+        let serialized = path.to_str().ok_or("Invalid path")?;
+
+        Ok(PathPayload { path: serialized.to_string() })
+    })
+    .await
+    .map_err(error_string)?
+}
+
 fn authenticate_account(
     state: &AppState,
     endpoint: &str,
@@ -2604,59 +2743,80 @@ fn install_launcher_update_sync(app: &AppHandle, state: &AppState) -> LauncherRe
         "installing",
         format!("Installing launcher {}...", pending.version),
     );
-    let target = env::current_exe().map_err(error_string)?;
-    let temp = launcher_temp_path()?;
-    fs::create_dir_all(&temp).map_err(error_string)?;
-    let batch_path = temp.join("apply-launcher-update.bat");
-    let error_log = launcher_data_path()?.join("update-error.log");
-    let script = [
-        "@echo off".to_string(),
-        "setlocal".to_string(),
-        format!("set \"LAUNCHER_PID={}\"", std::process::id()),
-        format!("set \"UPDATE_SOURCE={}\"", batch_escape(&destination)),
-        format!("set \"UPDATE_TARGET={}\"", batch_escape(&target)),
-        format!("set \"ERROR_LOG={}\"", batch_escape(&error_log)),
-        format!("rem Updating to {}", pending.version),
-        ":wait_for_launcher".to_string(),
-        "tasklist /FI \"PID eq %LAUNCHER_PID%\" 2>NUL | find \"%LAUNCHER_PID%\" >NUL".to_string(),
-        "if not errorlevel 1 ( ping 127.0.0.1 -n 2 >NUL & goto wait_for_launcher )".to_string(),
-        "set \"REPLACE_ATTEMPTS=0\"".to_string(),
-        ":replace_launcher".to_string(),
-        "copy /Y \"%UPDATE_SOURCE%\" \"%UPDATE_TARGET%\" >NUL 2>&1".to_string(),
-        "if not errorlevel 1 goto replacement_complete".to_string(),
-        "set /A REPLACE_ATTEMPTS+=1".to_string(),
-        "if %REPLACE_ATTEMPTS% GEQ 30 goto replacement_failed".to_string(),
-        "ping 127.0.0.1 -n 2 >NUL".to_string(),
-        "goto replace_launcher".to_string(),
-        ":replacement_failed".to_string(),
-        "echo The launcher update could not replace the portable executable.>\"%ERROR_LOG%\""
-            .to_string(),
-        "start \"\" \"%UPDATE_TARGET%\"".to_string(),
-        "exit /b 1".to_string(),
-        ":replacement_complete".to_string(),
-        "del /Q \"%UPDATE_SOURCE%\" >NUL 2>&1".to_string(),
-        "del /Q \"%ERROR_LOG%\" >NUL 2>&1".to_string(),
-        "start \"\" \"%UPDATE_TARGET%\"".to_string(),
-        "(goto) 2>NUL & del \"%~f0\"".to_string(),
-        String::new(),
-    ]
-    .join("\r\n");
-    fs::write(&batch_path, script).map_err(error_string)?;
-    let mut command = Command::new("cmd.exe");
-    command
-        .args(["/d", "/c"])
-        .arg(&batch_path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    #[cfg(windows)]
-    command.creation_flags(CREATE_NO_WINDOW);
-    command.spawn().map_err(error_string)?;
-    let app = app.clone();
-    thread::spawn(move || {
-        thread::sleep(Duration::from_millis(250));
-        app.exit(0);
-    });
+    
+    if cfg!(target_os = "windows") {
+        let target = env::current_exe().map_err(error_string)?;
+        let temp = launcher_temp_path()?;
+        fs::create_dir_all(&temp).map_err(error_string)?;
+        let batch_path = temp.join("apply-launcher-update.bat");
+        let error_log = launcher_data_path()?.join("update-error.log");
+        let script = [
+            "@echo off".to_string(),
+            "setlocal".to_string(),
+            format!("set \"LAUNCHER_PID={}\"", std::process::id()),
+            format!("set \"UPDATE_SOURCE={}\"", batch_escape(&destination)),
+            format!("set \"UPDATE_TARGET={}\"", batch_escape(&target)),
+            format!("set \"ERROR_LOG={}\"", batch_escape(&error_log)),
+            format!("rem Updating to {}", pending.version),
+            ":wait_for_launcher".to_string(),
+            "tasklist /FI \"PID eq %LAUNCHER_PID%\" 2>NUL | find \"%LAUNCHER_PID%\" >NUL".to_string(),
+            "if not errorlevel 1 ( ping 127.0.0.1 -n 2 >NUL & goto wait_for_launcher )".to_string(),
+            "set \"REPLACE_ATTEMPTS=0\"".to_string(),
+            ":replace_launcher".to_string(),
+            "copy /Y \"%UPDATE_SOURCE%\" \"%UPDATE_TARGET%\" >NUL 2>&1".to_string(),
+            "if not errorlevel 1 goto replacement_complete".to_string(),
+            "set /A REPLACE_ATTEMPTS+=1".to_string(),
+            "if %REPLACE_ATTEMPTS% GEQ 30 goto replacement_failed".to_string(),
+            "ping 127.0.0.1 -n 2 >NUL".to_string(),
+            "goto replace_launcher".to_string(),
+            ":replacement_failed".to_string(),
+            "echo The launcher update could not replace the portable executable.>\"%ERROR_LOG%\""
+                .to_string(),
+            "start \"\" \"%UPDATE_TARGET%\"".to_string(),
+            "exit /b 1".to_string(),
+            ":replacement_complete".to_string(),
+            "del /Q \"%UPDATE_SOURCE%\" >NUL 2>&1".to_string(),
+            "del /Q \"%ERROR_LOG%\" >NUL 2>&1".to_string(),
+            "start \"\" \"%UPDATE_TARGET%\"".to_string(),
+            "(goto) 2>NUL & del \"%~f0\"".to_string(),
+            String::new(),
+        ]
+        .join("\r\n");
+        fs::write(&batch_path, script).map_err(error_string)?;
+        let mut command = Command::new("cmd.exe");
+        command
+            .args(["/d", "/c"])
+            .arg(&batch_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        #[cfg(windows)]
+        command.creation_flags(CREATE_NO_WINDOW);
+        command.spawn().map_err(error_string)?;
+        let app = app.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(250));
+            app.exit(0);
+        });
+    } else {
+        // Can't use current_exe() b/c we're in an AppImage, $APPIMAGE is
+        // set to the path of the actual AppImage file.
+        let target = env::var("APPIMAGE").map_err(error_string)?;
+
+        // Make executable
+        println!("destination: {destination:?}");
+        println!("target: {target:?}");
+        let metadata = fs::metadata(&destination).map_err(error_string)?;
+        let mut permissions = metadata.permissions();
+        permissions.set_mode(permissions.mode() | 0o111);
+        fs::set_permissions(&destination, permissions).map_err(error_string)?;
+
+        fs::rename(&destination, &target).map_err(error_string)?;
+
+        // Replace current process with new version
+        let error = Command::new(&target).exec();
+        return Err(error_string(error));
+    }
     Ok(true)
 }
 
@@ -2683,6 +2843,12 @@ fn error_string(error: impl std::fmt::Display) -> String {
 }
 
 fn main() {
+    // Workaround for current Tauri versions not working with Gtk + some Nvidia drivers on Linux
+    #[cfg(target_os = "linux")]
+    {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Some(window) = app.get_webview_window("main") {
@@ -2691,6 +2857,7 @@ fn main() {
                 let _ = window.set_focus();
             }
         }))
+        .plugin(tauri_plugin_os::init())
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             get_state,
@@ -2717,6 +2884,7 @@ fn main() {
             check_ip_patch_update,
             check_game_update,
             install_launcher_update,
+            check_path
         ])
         .setup(|app| {
             cleanup_legacy_electron_data()

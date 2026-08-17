@@ -1,6 +1,6 @@
 {
   "name": "openshores-launcher",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "description": "A modern Windows launcher for OpenShores",
   "author": "Norway174",
   "license": "",
@@ -8,6 +8,7 @@
     "start": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-tauri.ps1",
     "test": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-tauri.ps1",
     "build": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-tauri.ps1",
-    "dist": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-tauri.ps1"
+    "dist": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-tauri.ps1",
+    "dist:linux": "rm -rf dist && mkdir dist && NO_STRIP=true cargo tauri build -b appimage"
   }
 }

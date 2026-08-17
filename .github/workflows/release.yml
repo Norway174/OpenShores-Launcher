@@ -35,7 +35,7 @@ jobs:
           "changed=$($changed.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
           "version=$current" >> $env:GITHUB_OUTPUT
 
-  build-and-release:
+  build-windows:
     needs: detect-version-change
     if: needs.detect-version-change.outputs.changed == 'true'
     runs-on: windows-latest
@@ -53,6 +53,63 @@ jobs:
       - name: Build portable launcher
         run: npm run dist
 
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: artifact-windows
+          path: dist/OpenShores-Launcher.exe
+
+  build-linux:
+    needs: detect-version-change
+    if: needs.detect-version-change.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: sudo apt update && sudo apt install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev libglib2.0-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable-x86_64-unknown-linux-gnu
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          cache-all-crates: true
+
+      - name: Install tauri CLI
+        run: cargo install tauri-cli@2.11.4
+
+      - name: Build portable launcher
+        run: npm run dist:linux
+
+      - name: Rename binary
+        run: mv ./src-tauri/target/release/bundle/appimage/*.AppImage dist/OpenShores-Launcher-amd64.AppImage
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: artifact-linux
+          path: dist/OpenShores-Launcher-amd64.AppImage
+
+  publish-release:
+    needs: [build-linux, build-windows, detect-version-change]
+    if: needs.detect-version-change.outputs.changed == 'true'
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: artifact-windows
+          path: OpenShores-Launcher.exe
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: artifact-linux
+          path: OpenShores-Launcher-amd64.AppImage
+      - name: Print working directory
+        run: pwd; env
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
@@ -61,4 +118,6 @@ jobs:
           target_commitish: ${{ github.sha }}
           generate_release_notes: true
           fail_on_unmatched_files: true
-          files: dist/OpenShores-Launcher.exe
+          files: |
+            */**/OpenShores-Launcher.exe
+            */**/OpenShores-Launcher-amd64.AppImage
