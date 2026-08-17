@@ -14,8 +14,8 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     env,
-    fs::{self, File},
-    io::{Read, Write},
+    fs::{self, File, OpenOptions},
+    io::{Read, Seek, SeekFrom, Write},
     path::{Component, Path, PathBuf},
     process::{Command, Stdio},
     sync::{
@@ -48,6 +48,7 @@ const LAUNCHER_RELEASE_API: &str =
     "https://api.github.com/repos/Norway174/OpenShores-Launcher/releases/latest";
 const GAME_EXE: &str = "Shores of Hazeron.exe";
 const GAME_DLL: &str = "AuLoginClient13.dll";
+const CLIENT_LOG: &str = "ClientInterface.log";
 const MANIFEST_FILE: &str = ".openshores-launcher.json";
 const MANAGED_BY: &str = "OpenShores Launcher";
 const LATEST_PATCH_RELEASE: &str = "latest";
@@ -119,6 +120,8 @@ struct LauncherConfig {
     connected_server_id: Option<String>,
     #[serde(default)]
     accounts: Vec<SavedAccount>,
+    #[serde(rename = "developerMode", default)]
+    developer_mode: bool,
 }
 
 impl Default for LauncherConfig {
@@ -130,6 +133,7 @@ impl Default for LauncherConfig {
             servers: Some(vec![default_server()]),
             connected_server_id: None,
             accounts: Vec::new(),
+            developer_mode: false,
         }
     }
 }
@@ -208,6 +212,7 @@ struct LauncherSnapshot {
     servers: Vec<ServerSnapshot>,
     connected_server_id: Option<String>,
     account_username: Option<String>,
+    developer_mode: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -253,6 +258,14 @@ struct UpdaterStatusPayload {
 #[serde(rename_all = "camelCase")]
 struct PathPayload {
     path: String
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClientLogChunk {
+    content: String,
+    next_offset: u64,
+    reset: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -454,6 +467,12 @@ fn save_patch_selection(selection: String) -> LauncherResult<LauncherConfig> {
     Ok(config)
 }
 
+fn save_developer_mode(enabled: bool) -> LauncherResult<()> {
+    let mut config = load_config()?;
+    config.developer_mode = enabled;
+    write_json(&config_path()?, &config)
+}
+
 fn save_applied_patch_release(tag: Option<&str>) -> LauncherResult<()> {
     let mut config = load_config()?;
     config.applied_ip_patch_release = tag.map(str::to_string);
@@ -508,6 +527,7 @@ fn get_snapshot(state: &AppState) -> LauncherResult<LauncherSnapshot> {
         servers,
         connected_server_id: config.connected_server_id,
         account_username,
+        developer_mode: config.developer_mode,
     })
 }
 
@@ -2318,6 +2338,75 @@ fn get_state(state: State<'_, AppState>) -> LauncherResult<LauncherSnapshot> {
     get_snapshot(state.inner())
 }
 
+fn read_client_log_sync(offset: u64) -> LauncherResult<ClientLogChunk> {
+    let config = load_config()?;
+    if !config.developer_mode {
+        return Err("Developer mode must be enabled to read the client log.".to_string());
+    }
+    let log_path = PathBuf::from(
+        config
+            .install_path
+            .unwrap_or(default_install_path()?.to_string_lossy().into_owned()),
+    )
+    .join(CLIENT_LOG);
+    if !log_path.is_file() {
+        return Ok(ClientLogChunk {
+            content: String::new(),
+            next_offset: 0,
+            reset: offset > 0,
+        });
+    }
+
+    let mut file = File::open(log_path).map_err(error_string)?;
+    let length = file.metadata().map_err(error_string)?.len();
+    let reset = length < offset;
+    let start = if reset { 0 } else { offset };
+    file.seek(SeekFrom::Start(start)).map_err(error_string)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).map_err(error_string)?;
+    Ok(ClientLogChunk {
+        next_offset: start + bytes.len() as u64,
+        content: String::from_utf8_lossy(&bytes).into_owned(),
+        reset,
+    })
+}
+
+#[tauri::command]
+async fn read_client_log(offset: u64) -> LauncherResult<ClientLogChunk> {
+    tauri::async_runtime::spawn_blocking(move || read_client_log_sync(offset))
+        .await
+        .map_err(error_string)?
+}
+
+fn clear_client_log_sync() -> LauncherResult<()> {
+    let config = load_config()?;
+    if !config.developer_mode {
+        return Err("Developer mode must be enabled to clear the client log.".to_string());
+    }
+    let log_path = PathBuf::from(
+        config
+            .install_path
+            .unwrap_or(default_install_path()?.to_string_lossy().into_owned()),
+    )
+    .join(CLIENT_LOG);
+    if !log_path.is_file() {
+        return Ok(());
+    }
+    OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(log_path)
+        .map_err(error_string)?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn clear_client_log() -> LauncherResult<()> {
+    tauri::async_runtime::spawn_blocking(clear_client_log_sync)
+        .await
+        .map_err(error_string)?
+}
+
 #[tauri::command]
 async fn choose_folder(
     app: AppHandle,
@@ -2381,6 +2470,12 @@ async fn set_ip_patch_release(
     selection: String,
 ) -> LauncherResult<LauncherSnapshot> {
     save_patch_selection(selection)?;
+    get_snapshot(state.inner())
+}
+
+#[tauri::command]
+fn set_developer_mode(state: State<'_, AppState>, enabled: bool) -> LauncherResult<LauncherSnapshot> {
+    save_developer_mode(enabled)?;
     get_snapshot(state.inner())
 }
 
@@ -2519,6 +2614,7 @@ fn remove_server(
 #[tauri::command]
 async fn connect_server(
     server_id: Option<String>,
+    force: bool,
     state: State<'_, AppState>,
 ) -> LauncherResult<LauncherSnapshot> {
     let backend = state.inner().clone();
@@ -2526,29 +2622,64 @@ async fn connect_server(
         let mut config = load_config()?;
         if let Some(id) = server_id.as_deref() {
             let server = server_by_id(&config, id)?;
-            let client = Client::builder()
-                .user_agent(format!(
-                    "OpenShores-Launcher/{}",
-                    env!("OPENSHORES_LAUNCHER_VERSION")
-                ))
-                .timeout(Duration::from_secs(5))
-                .build()
-                .map_err(error_string)?;
-            let status = fetch_server_status(&client, &server);
-            backend
-                .server_statuses
-                .lock()
-                .map_err(error_string)?
-                .insert(server.id, status.clone());
-            if !status.online() {
-                return Err(
-                    "This server is unavailable or offline. Refresh its status and try again."
-                        .to_string(),
-                );
+            if force {
+                if !config.developer_mode {
+                    return Err("Developer mode must be enabled to force a connection.".to_string());
+                }
+            } else {
+                let client = Client::builder()
+                    .user_agent(format!(
+                        "OpenShores-Launcher/{}",
+                        env!("OPENSHORES_LAUNCHER_VERSION")
+                    ))
+                    .timeout(Duration::from_secs(5))
+                    .build()
+                    .map_err(error_string)?;
+                let status = fetch_server_status(&client, &server);
+                backend
+                    .server_statuses
+                    .lock()
+                    .map_err(error_string)?
+                    .insert(server.id, status.clone());
+                if !status.online() {
+                    return Err(
+                        "This server is unavailable or offline. Refresh its status and try again."
+                            .to_string(),
+                    );
+                }
             }
         }
         config.connected_server_id = server_id;
         write_json(&config_path()?, &config)?;
+        get_snapshot(&backend)
+    })
+    .await
+    .map_err(error_string)?
+}
+
+#[tauri::command]
+async fn refresh_server_status(
+    server_id: String,
+    state: State<'_, AppState>,
+) -> LauncherResult<LauncherSnapshot> {
+    let backend = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let config = load_config()?;
+        let server = server_by_id(&config, &server_id)?;
+        let client = Client::builder()
+            .user_agent(format!(
+                "OpenShores-Launcher/{}",
+                env!("OPENSHORES_LAUNCHER_VERSION")
+            ))
+            .timeout(Duration::from_secs(5))
+            .build()
+            .map_err(error_string)?;
+        let status = fetch_server_status(&client, &server);
+        backend
+            .server_statuses
+            .lock()
+            .map_err(error_string)?
+            .insert(server.id, status);
         get_snapshot(&backend)
     })
     .await
@@ -2968,16 +3099,20 @@ fn main() {
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             get_state,
+            read_client_log,
+            clear_client_log,
             choose_folder,
             install_game,
             get_ip_patch_releases,
             set_ip_patch_release,
+            set_developer_mode,
             update_ip_patch,
             uninstall_game,
             add_server,
             edit_server,
             remove_server,
             connect_server,
+            refresh_server_status,
             refresh_server_statuses,
             login_account,
             register_account,

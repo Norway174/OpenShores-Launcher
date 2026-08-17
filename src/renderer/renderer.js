@@ -6,16 +6,20 @@ const { listen } = window.__TAURI__.event;
 const { platform } = window.__TAURI__.os;
 window.launcher = {
   getState: () => invoke('get_state'),
+  readClientLog: offset => invoke('read_client_log', { offset }),
+  clearClientLog: () => invoke('clear_client_log'),
   chooseFolder: () => invoke('choose_folder'),
   install: () => invoke('install_game'),
   getPatchReleases: () => invoke('get_ip_patch_releases'),
   setPatchRelease: selection => invoke('set_ip_patch_release', { selection }),
+  setDeveloperMode: enabled => invoke('set_developer_mode', { enabled }),
   updatePatch: () => invoke('update_ip_patch'),
   uninstall: () => invoke('uninstall_game'),
   addServer: (nickname, host) => invoke('add_server', { nickname, host }),
   editServer: (serverId, nickname, host) => invoke('edit_server', { serverId, nickname, host }),
   removeServer: serverId => invoke('remove_server', { serverId }),
-  connectServer: serverId => invoke('connect_server', { serverId }),
+  connectServer: (serverId, force = false) => invoke('connect_server', { serverId, force }),
+  refreshServerStatus: serverId => invoke('refresh_server_status', { serverId }),
   refreshServerStatuses: () => invoke('refresh_server_statuses'),
   loginAccount: (username, password) => invoke('login_account', { username, password }),
   registerAccount: (username, password) => invoke('register_account', { username, password }),
@@ -41,6 +45,14 @@ let busy = false;
 let serverStatusTimer = null;
 let patchUpdateTimer = null;
 let gameUpdateTimer = null;
+let logUpdateTimer = null;
+let logFilterTimer = null;
+let logText = '';
+let logOffset = 0;
+let logLoaded = false;
+let logReadBusy = false;
+let logActionBusy = false;
+let logGeneration = 0;
 let serverRefreshBusy = false;
 let registering = false;
 const launchingProcesses = new Set();
@@ -63,6 +75,133 @@ let linuxState = {
 
 function connectedServer() {
   return state?.servers?.find(server => server.id === state.connectedServerId) || null;
+}
+
+function appendSearchHighlights(target, text, filter) {
+  if (!filter) {
+    target.append(document.createTextNode(text));
+    return;
+  }
+  const lowerText = text.toLocaleLowerCase();
+  const lowerFilter = filter.toLocaleLowerCase();
+  let cursor = 0;
+  let match = lowerText.indexOf(lowerFilter);
+  while (match !== -1) {
+    target.append(document.createTextNode(text.slice(cursor, match)));
+    const mark = document.createElement('mark');
+    mark.textContent = text.slice(match, match + filter.length);
+    target.append(mark);
+    cursor = match + filter.length;
+    match = lowerText.indexOf(lowerFilter, cursor);
+  }
+  target.append(document.createTextNode(text.slice(cursor)));
+}
+
+function appendHighlightedLogLine(target, line, filter) {
+  const tokenPattern = /\b(?:FATAL|ERROR|EXCEPTION|WARN(?:ING)?|INFO|DEBUG|TRACE)\b|\b\d{4}-\d{2}-\d{2}[T ][0-9:.+\-Z]+|\b\d{1,2}:\d{2}:\d{2}(?:\.\d+)?\b/gi;
+  let cursor = 0;
+  for (const match of line.matchAll(tokenPattern)) {
+    appendSearchHighlights(target, line.slice(cursor, match.index), filter);
+    const token = document.createElement('span');
+    const value = match[0];
+    const tokenName = /^\d/.test(value) ? 'time' : value.toLowerCase();
+    token.className = `log-token-${tokenName}`;
+    appendSearchHighlights(token, value, filter);
+    target.append(token);
+    cursor = match.index + value.length;
+  }
+  appendSearchHighlights(target, line.slice(cursor), filter);
+}
+
+function renderLog(scrollToEnd = false) {
+  const output = $('#log-output');
+  const filter = $('#log-filter').value.trim();
+  const lines = logText ? logText.split(/\r?\n/) : [];
+  if (lines.at(-1) === '') lines.pop();
+  const visible = filter
+    ? lines.map((line, index) => ({ line, index })).filter(item => item.line.toLocaleLowerCase().includes(filter.toLocaleLowerCase()))
+    : lines.map((line, index) => ({ line, index }));
+  const fragment = document.createDocumentFragment();
+
+  for (const item of visible) {
+    const row = document.createElement('div');
+    row.className = 'log-line';
+    const trimmedLine = item.line.trimStart();
+    if (trimmedLine.startsWith('@@')) row.classList.add('log-diff-section');
+    else if (trimmedLine.startsWith('+')) row.classList.add('log-diff-add');
+    else if (trimmedLine.startsWith('-')) row.classList.add('log-diff-remove');
+    else if (trimmedLine.startsWith('=')) row.classList.add('log-diff-equal');
+    else if (/\b(?:fatal|error|exception|failed|failure)\b/i.test(item.line)) row.classList.add('log-error');
+    else if (/\bwarn(?:ing)?\b/i.test(item.line)) row.classList.add('log-warning');
+    else if (/\bdebug\b/i.test(item.line)) row.classList.add('log-debug');
+    else if (/\btrace\b/i.test(item.line)) row.classList.add('log-trace');
+    const number = document.createElement('span');
+    number.className = 'log-line-number';
+    number.textContent = String(item.index + 1);
+    const content = document.createElement('span');
+    content.className = 'log-line-content';
+    appendHighlightedLogLine(content, item.line, filter);
+    row.append(number, content);
+    fragment.append(row);
+  }
+
+  output.replaceChildren();
+  if (visible.length) output.append(fragment);
+  else {
+    const empty = document.createElement('div');
+    empty.className = 'log-empty';
+    empty.textContent = filter && lines.length ? 'No log entries match this filter.' : 'ClientInterface.log is empty.';
+    output.append(empty);
+  }
+  $('#log-match-count').textContent = filter ? `${visible.length} of ${lines.length} lines` : `${lines.length} lines`;
+  $('#copy-log').disabled = !logText;
+  $('#clear-log').disabled = logActionBusy;
+  if (scrollToEnd) output.scrollTop = output.scrollHeight;
+}
+
+async function readClientLog(reset = false) {
+  if (logReadBusy || logActionBusy || !state?.developerMode) return;
+  logReadBusy = true;
+  const generation = logGeneration;
+  const output = $('#log-output');
+  const wasAtBottom = output.scrollHeight - output.scrollTop - output.clientHeight < 30;
+  const requestedOffset = reset ? 0 : logOffset;
+  try {
+    const chunk = await window.launcher.readClientLog(requestedOffset);
+    if (generation !== logGeneration) return;
+    const changed = chunk.reset || requestedOffset === 0 || !!chunk.content;
+    logText = chunk.reset || requestedOffset === 0 ? chunk.content : logText + chunk.content;
+    logOffset = chunk.nextOffset;
+    logLoaded = true;
+    const status = $('#log-status');
+    status.textContent = state.gameRunning ? 'Watching live' : 'Game is not running';
+    status.classList.toggle('live', !!state.gameRunning);
+    status.removeAttribute('title');
+    if (changed && $('#log-view').classList.contains('active')) renderLog(reset || wasAtBottom);
+  } catch (error) {
+    const status = $('#log-status');
+    status.textContent = 'Log unavailable';
+    status.classList.remove('live');
+    status.title = error?.message || String(error);
+  } finally {
+    logReadBusy = false;
+  }
+}
+
+function syncLogMonitoring() {
+  const status = $('#log-status');
+  const shouldMonitor = !!state?.developerMode && !!state?.gameRunning;
+  status.textContent = shouldMonitor ? 'Watching live' : 'Game is not running';
+  status.classList.toggle('live', shouldMonitor);
+  status.removeAttribute('title');
+  if (shouldMonitor && !logUpdateTimer) {
+    readClientLog(true);
+    logUpdateTimer = window.setInterval(() => readClientLog(), 500);
+  } else if (!shouldMonitor && logUpdateTimer) {
+    window.clearInterval(logUpdateTimer);
+    logUpdateTimer = null;
+    if (state?.developerMode) readClientLog();
+  }
 }
 
 function statusLabel(value) {
@@ -112,12 +251,27 @@ function renderServers() {
     connect.dataset.action = 'connect';
     connect.dataset.serverId = server.id;
     connect.textContent = server.id === state.connectedServerId ? 'Disconnect' : 'Connect';
-    connect.disabled = server.id !== state.connectedServerId && !online;
-    connect.title = connect.disabled ? 'This server must be online before you can connect.' : '';
+    const developerConnect = state.developerMode && server.id !== state.connectedServerId && !online;
+    connect.disabled = server.id !== state.connectedServerId && !online && !developerConnect;
+    connect.classList.toggle('developer-force-connect', developerConnect);
+    if (developerConnect) {
+      connect.dataset.forceConnect = 'true';
+      connect.setAttribute('aria-disabled', 'true');
+      connect.title = 'Unavailable. Double-click to connect in Developer mode.';
+    } else {
+      connect.title = connect.disabled ? 'This server must be online before you can connect.' : '';
+    }
     const controls = document.createElement('div');
     controls.className = 'server-card-controls';
     const tools = document.createElement('div');
     tools.className = 'server-card-tools';
+    const refresh = document.createElement('button');
+    refresh.className = 'icon-button';
+    refresh.dataset.action = 'refresh';
+    refresh.dataset.serverId = server.id;
+    refresh.setAttribute('aria-label', `Refresh ${server.nickname}`);
+    refresh.title = 'Refresh server status';
+    refresh.textContent = 'Refresh';
     const edit = document.createElement('button');
     edit.className = 'icon-button';
     edit.dataset.action = 'edit';
@@ -132,7 +286,7 @@ function renderServers() {
     remove.setAttribute('aria-label', `Remove ${server.nickname}`);
     remove.title = 'Remove server';
     remove.textContent = '×';
-    tools.append(edit, remove);
+    tools.append(refresh, edit, remove);
     controls.append(tools, connect);
     top.append(identity, controls);
     const services = document.createElement('div');
@@ -300,6 +454,12 @@ function render(nextState = state) {
   $('#open-folder').disabled = !state.installed || busy;
   $('#uninstall').disabled = !state.installed || busy;
   $('#patch-release').disabled = busy;
+  $('#patch-release').classList.toggle('hidden', !state.developerMode);
+  $('#refresh-patch-releases').classList.toggle('hidden', !state.developerMode);
+  $('#log-tab').classList.toggle('hidden', !state.developerMode);
+  if (!state.developerMode && $('#log-tab').classList.contains('active')) switchView('home');
+  $('#developer-mode').checked = !!state.developerMode;
+  $('#developer-mode').disabled = busy;
   $('#choose-folder').disabled = busy || anyProcessRunning;
   $('#choose-folder').textContent = state.installed ? 'Move…' : 'Browse…';
   renderServers();
@@ -327,9 +487,17 @@ function render(nextState = state) {
     state.installed ? 'Launch OpenShores' : 'Install OpenShores',
     true
   );
+  renderProcessButton(
+    $('#log-launch'),
+    'game',
+    !!state.gameRunning,
+    state.installed ? 'Launch OpenShores' : 'Install OpenShores',
+    true
+  );
   renderProcessButton(designer, 'designer', !!state.designerRunning, 'Offline Designers...', state.installed);
   if (state.designerRunning || launchingProcesses.has('designer') || designer.disabled) closeDesignerMenu();
   renderUpdateTasks();
+  syncLogMonitoring();
 }
 
 async function runOperation(operation, showProgress = true) {
@@ -544,10 +712,14 @@ async function installLauncherUpdateNow() {
 
 function switchView(viewName) {
   const button = document.querySelector(`.nav-item[data-view="${viewName}"]`);
-  if (!button || button.disabled) return;
+  if (!button || button.disabled || button.classList.contains('hidden')) return;
   document.querySelectorAll('.nav-item').forEach(item => item.classList.toggle('active', item === button));
   document.querySelectorAll('.view').forEach(view => view.classList.remove('active'));
   $(`#${viewName}-view`).classList.add('active');
+  if (viewName === 'log') {
+    renderLog(true);
+    readClientLog(true);
+  }
 }
 
 document.querySelectorAll('.nav-item').forEach(button => button.addEventListener('click', () => switchView(button.dataset.view)));
@@ -608,11 +780,32 @@ $('#save-server').addEventListener('click', async () => {
   }
 });
 
+async function connectFromServerButton(button, server, force = false) {
+  const connecting = server.id !== state.connectedServerId;
+  if (connecting) {
+    button.disabled = true;
+    button.classList.add('connecting');
+    button.textContent = 'Connecting';
+  }
+  const connected = await updateServerState(() => connecting
+    ? withMinimumDelay(() => window.launcher.connectServer(server.id, force))
+    : window.launcher.connectServer(null));
+  if (!connected) {
+    try { render(await window.launcher.getState()); } catch (_) { /* Keep the last known state. */ }
+  }
+}
+
 $('#server-list').addEventListener('click', async event => {
   const button = event.target.closest('button[data-action]');
   if (!button) return;
   const server = state.servers.find(item => item.id === button.dataset.serverId);
   if (!server) return;
+  if (button.dataset.action === 'refresh') {
+    button.disabled = true;
+    button.textContent = 'Refreshing...';
+    await updateServerState(() => window.launcher.refreshServerStatus(server.id));
+    return;
+  }
   if (button.dataset.action === 'edit') {
     showServerDialog(server);
     return;
@@ -623,19 +816,18 @@ $('#server-list').addEventListener('click', async event => {
     return;
   }
   if (button.dataset.action === 'connect') {
-    const connecting = server.id !== state.connectedServerId;
-    if (connecting) {
-      button.disabled = true;
-      button.classList.add('connecting');
-      button.textContent = 'Connecting';
-    }
-    const connected = await updateServerState(() => connecting
-      ? withMinimumDelay(() => window.launcher.connectServer(server.id))
-      : window.launcher.connectServer(null));
-    if (!connected) {
-      try { render(await window.launcher.getState()); } catch (_) { /* Keep the last known state. */ }
-    }
+    if (button.dataset.forceConnect === 'true') return;
+    await connectFromServerButton(button, server);
   }
+});
+
+$('#server-list').addEventListener('dblclick', async event => {
+  const button = event.target.closest('button[data-force-connect="true"]');
+  if (!button || !state.developerMode) return;
+  const server = state.servers.find(item => item.id === button.dataset.serverId);
+  if (!server) return;
+  event.preventDefault();
+  await connectFromServerButton(button, server, true);
 });
 
 function setRegistering(value) {
@@ -726,11 +918,14 @@ function closeStopModal() {
   if (stopModalPreviousFocus?.focus) stopModalPreviousFocus.focus();
 }
 
-$('#primary-action').addEventListener('click', () => {
+function handleGameAction() {
   if (state.gameRunning) openStopModal('game');
   else if (state.installed) launchProcess('game', window.launcher.launch);
   else runOperation(window.launcher.install);
-});
+}
+
+$('#primary-action').addEventListener('click', handleGameAction);
+$('#log-launch').addEventListener('click', handleGameAction);
 $('#offline-designer').addEventListener('click', () => {
   if (state.designerRunning) openStopModal('designer');
   else if ($('#offline-designer-menu').hidden) openDesignerMenu();
@@ -813,6 +1008,61 @@ $('#patch-release').addEventListener('change', event => {
   }, false);
 });
 $('#check-updates').addEventListener('click', () => enqueueMaintenance('launcher', 'check'));
+$('#log-filter').addEventListener('input', () => {
+  window.clearTimeout(logFilterTimer);
+  logFilterTimer = window.setTimeout(() => {
+    $('#log-output').scrollTop = 0;
+    renderLog();
+  }, 100);
+});
+$('#copy-log').addEventListener('click', async () => {
+  if (!logText) return;
+  const button = $('#copy-log');
+  const copiedLog = `\`\`\`diff\n${logText}${logText.endsWith('\n') ? '' : '\n'}\`\`\``;
+  try {
+    await navigator.clipboard.writeText(copiedLog);
+  } catch (_) {
+    const textarea = document.createElement('textarea');
+    textarea.value = copiedLog;
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.append(textarea);
+    textarea.select();
+    document.execCommand('copy');
+    textarea.remove();
+  }
+  button.textContent = 'Copied';
+  window.setTimeout(() => { button.textContent = 'Copy whole log'; }, 1200);
+});
+$('#clear-log').addEventListener('click', async () => {
+  if (logActionBusy) return;
+  logActionBusy = true;
+  logGeneration += 1;
+  renderLog();
+  const button = $('#clear-log');
+  button.textContent = 'Clearing…';
+  try {
+    await window.launcher.clearClientLog();
+    logText = '';
+    logOffset = 0;
+    logLoaded = true;
+    renderLog();
+  } catch (error) {
+    const status = $('#log-status');
+    status.textContent = 'Could not clear log';
+    status.classList.remove('live');
+    status.title = error?.message || String(error);
+  } finally {
+    logActionBusy = false;
+    button.textContent = 'Clear Log';
+    renderLog();
+  }
+});
+$('#developer-mode').addEventListener('change', event => {
+  const enabled = event.currentTarget.checked;
+  state = { ...state, developerMode: enabled };
+  runOperation(() => window.launcher.setDeveloperMode(enabled), false);
+});
 document.addEventListener('keydown', event => {
   if (event.key === 'Escape') {
     closeServerDialog();

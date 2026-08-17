@@ -23,6 +23,7 @@
             <button id="account-tab" class="nav-item" data-view="account" disabled>Account</button>
           </span>
           <button class="nav-item" data-view="settings">Settings</button>
+          <button id="log-tab" class="nav-item hidden" data-view="log">Log</button>
           <span class="nav-spacer"></span>
           <span id="service-state" class="service-state offline"><i></i><span>OFFLINE</span></span>
           <span class="version">v...</span>
@@ -111,6 +112,22 @@
           </div>
         </section>
 
+        <section id="log-view" class="view log-view">
+          <div class="view-header log-header">
+            <div><span class="kicker">DEVELOPER</span><h1>Client log</h1><p>Live output from ClientInterface.log.</p></div>
+            <div class="log-search"><span id="log-match-count" class="log-match-count"></span><input id="log-filter" type="search" placeholder="Filter log…" aria-label="Filter client log"></div>
+          </div>
+          <div class="log-workspace">
+            <aside class="log-sidebar">
+              <span id="log-status" class="log-status">Game is not running</span>
+              <button id="log-launch" class="primary">Launch OpenShores</button>
+              <button id="copy-log" class="secondary" disabled>Copy whole log</button>
+              <button id="clear-log" class="secondary">Clear Log</button>
+            </aside>
+            <div id="log-output" class="log-output" role="log" tabindex="0" aria-label="Client log output"></div>
+          </div>
+        </section>
+
         <section id="settings-view" class="view settings-view">
           <div class="settings-header"><div><span class="kicker">LAUNCHER SETTINGS</span><h1>Installation & updates</h1></div></div>
           <div class="settings-group">
@@ -129,6 +146,7 @@
             <h2>Launcher settings</h2>
             <div class="settings-list">
               <div class="setting-row"><div><strong>Launcher updates</strong><p>Check the GitHub releases feed for a newer launcher.</p><p id="update-check-result" class="update-check-result hidden" role="status" aria-live="polite"></p></div><span class="update-button-wrap" data-tooltip=""><button id="check-updates" class="secondary update-task-button"><span class="button-label">Check now</span><span class="button-progress"></span></button></span></div>
+              <div class="setting-row"><div><strong>Developer</strong><p>Enable launcher features intended for developers.</p></div><label class="toggle-switch" for="developer-mode"><input id="developer-mode" type="checkbox" role="switch"><span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span></label></div>
             </div>
           </div>
           <div class="links">
