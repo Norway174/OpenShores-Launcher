@@ -51,6 +51,7 @@ const GAME_DLL: &str = "AuLoginClient13.dll";
 const MANIFEST_FILE: &str = ".openshores-launcher.json";
 const MANAGED_BY: &str = "OpenShores Launcher";
 const LATEST_PATCH_RELEASE: &str = "latest";
+const DISABLED_PATCH_RELEASE: &str = "none";
 const PATCH_ORIGINALS_DIR: &str = ".openshores-patch-originals";
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const METADATA_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -216,6 +217,7 @@ struct PatchReleaseOption {
     name: String,
     published_at: Option<String>,
     has_zip: bool,
+    prerelease: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -452,9 +454,9 @@ fn save_patch_selection(selection: String) -> LauncherResult<LauncherConfig> {
     Ok(config)
 }
 
-fn save_applied_patch_release(tag: &str) -> LauncherResult<()> {
+fn save_applied_patch_release(tag: Option<&str>) -> LauncherResult<()> {
     let mut config = load_config()?;
-    config.applied_ip_patch_release = Some(tag.to_string());
+    config.applied_ip_patch_release = tag.map(str::to_string);
     write_json(&config_path()?, &config)
 }
 
@@ -1250,6 +1252,7 @@ fn patch_release_options(releases: &[GithubRelease]) -> Vec<PatchReleaseOption> 
                 .unwrap_or_else(|| release.tag_name.clone()),
             published_at: release.published_at.clone(),
             has_zip: patch_zip_asset(release).is_some(),
+            prerelease: release.prerelease,
         })
         .collect()
 }
@@ -1539,6 +1542,12 @@ fn update_ip_patch_sync(
     if !is_managed_manifest(read_json::<Value>(&install_path.join(MANIFEST_FILE)).as_ref()) {
         return get_snapshot(state);
     }
+    if config
+        .ip_patch_release
+        .eq_ignore_ascii_case(DISABLED_PATCH_RELEASE)
+    {
+        return install_game_sync(app, state, install_path);
+    }
     let guard = begin_operation(state)?;
     if any_game_process_running(state)? {
         return Err("Close OpenShores before updating the IP patch.".to_string());
@@ -1582,7 +1591,7 @@ fn update_ip_patch_sync(
             75.0,
         )?;
         update_manifest_patch(&install_path, &release)?;
-        save_applied_patch_release(&release.tag_name)?;
+        save_applied_patch_release(Some(&release.tag_name))?;
         emit_progress(
             app,
             "IP patch is up to date",
@@ -1662,34 +1671,46 @@ fn install_game_sync(
             return Err("The OpenShores manifest is missing required game files.".to_string());
         }
 
-        emit_progress(
-            app,
-            "Getting the IP patch",
-            71.0,
-            "Checking the selected patch release...",
-        );
-        let releases = fetch_patch_releases(&client)?;
         let selection = load_config()?.ip_patch_release;
-        let release = resolve_patch_release(&releases, &selection)?;
-        download_and_apply_patch(app, &client, &release, &game_root, &patch_path, 72.0, 84.0)?;
+        let release = if selection.eq_ignore_ascii_case(DISABLED_PATCH_RELEASE) {
+            emit_progress(
+                app,
+                "IP patch disabled",
+                84.0,
+                "Installing clean game files without the IP patch.",
+            );
+            None
+        } else {
+            emit_progress(
+                app,
+                "Getting the IP patch",
+                71.0,
+                "Checking the selected patch release...",
+            );
+            let releases = fetch_patch_releases(&client)?;
+            let release = resolve_patch_release(&releases, &selection)?;
+            download_and_apply_patch(app, &client, &release, &game_root, &patch_path, 72.0, 84.0)?;
+            Some(release)
+        };
 
         let installed_at = OffsetDateTime::now_utc()
             .format(&Rfc3339)
             .map_err(error_string)?;
-        write_json(
-            &game_root.join(MANIFEST_FILE),
-            &json!({
-                "managedBy": MANAGED_BY,
-                "launcherVersion": env!("OPENSHORES_LAUNCHER_VERSION"),
-                "installedAt": installed_at,
-                "gameManifestUrl": GAME_MANIFEST_URL,
-                "gameManifestVersion": game_manifest.version,
-                "gameManifestGenerated": game_manifest.generated,
-                "gameManifestFileCount": game_manifest.files.len(),
-                "patchTag": release.tag_name,
-                "patchPublishedAt": release.published_at
-            }),
-        )?;
+        let mut launcher_manifest = json!({
+            "managedBy": MANAGED_BY,
+            "launcherVersion": env!("OPENSHORES_LAUNCHER_VERSION"),
+            "installedAt": installed_at,
+            "gameManifestUrl": GAME_MANIFEST_URL,
+            "gameManifestVersion": game_manifest.version,
+            "gameManifestGenerated": game_manifest.generated,
+            "gameManifestFileCount": game_manifest.files.len()
+        });
+        if let Some(release) = release.as_ref() {
+            let object = launcher_manifest.as_object_mut().unwrap();
+            object.insert("patchTag".to_string(), json!(release.tag_name));
+            object.insert("patchPublishedAt".to_string(), json!(release.published_at));
+        }
+        write_json(&game_root.join(MANIFEST_FILE), &launcher_manifest)?;
         emit_progress(
             app,
             "Finishing installation",
@@ -1706,12 +1727,16 @@ fn install_game_sync(
             backup_active = false;
         }
         save_install_path(&install_path)?;
-        save_applied_patch_release(&release.tag_name)?;
+        save_applied_patch_release(release.as_ref().map(|release| release.tag_name.as_str()))?;
         emit_progress(
             app,
             "Ready to play",
             100.0,
-            "OpenShores and the IP patch are installed.",
+            if release.is_some() {
+                "OpenShores and the IP patch are installed."
+            } else {
+                "OpenShores is installed without the IP patch."
+            },
         );
         get_snapshot(state)
     })();
@@ -1982,6 +2007,23 @@ fn check_ip_patch_update_sync() -> LauncherResult<UpdaterStatusPayload> {
         return Ok(UpdaterStatusPayload {
             state: "current".to_string(),
             message: "Install OpenShores before checking the IP patch.".to_string(),
+        });
+    }
+
+    if config
+        .ip_patch_release
+        .eq_ignore_ascii_case(DISABLED_PATCH_RELEASE)
+    {
+        return Ok(if config.applied_ip_patch_release.is_some() {
+            UpdaterStatusPayload {
+                state: "available".to_string(),
+                message: "The installed IP patch can be removed.".to_string(),
+            }
+        } else {
+            UpdaterStatusPayload {
+                state: "current".to_string(),
+                message: "The IP patch is disabled.".to_string(),
+            }
         });
     }
 

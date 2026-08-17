@@ -55,6 +55,7 @@ const maintenanceQueue = [];
 let maintenanceActive = false;
 let maintenanceGeneration = 0;
 let activeUpdateKind = null;
+let latestPatchLabel = 'Latest Release';
 let linuxState = {
   winePath: null,
   xdeltaPath: null
@@ -288,8 +289,11 @@ function render(nextState = state) {
   $('#startup-placeholder').classList.add('hidden');
   $('#actions').classList.remove('hidden');
   $('#install-path').textContent = state.installPath;
-  $('#patch-channel').textContent = state.ipPatchRelease === 'latest' ? 'Latest Release' : state.ipPatchRelease;
+  $('#patch-channel').textContent = state.ipPatchRelease === 'latest'
+    ? latestPatchLabel
+    : state.ipPatchRelease === 'none' ? 'Disable IP Patch' : state.ipPatchRelease;
   $('#patch-release').value = state.ipPatchRelease || 'latest';
+  $('#patch-release').classList.toggle('disabled-selection', state.ipPatchRelease === 'none');
   $('#patch-badge').classList.toggle('hidden', !state.installed);
   $('#game-source').textContent = connectedServer()?.host || 'No server selected';
   const anyProcessRunning = state.gameRunning || state.designerRunning;
@@ -468,9 +472,21 @@ async function runMaintenanceItem(item) {
     removeUpdateBanner(item.kind);
     if (item.kind === 'game') {
       removeUpdateBanner('patch');
-      setUpdateTask('patch', 'current', 'The selected IP patch was reapplied with the game update.');
+      setUpdateTask(
+        'patch',
+        'current',
+        state.ipPatchRelease === 'none'
+          ? 'The IP patch remains disabled after the game update.'
+          : 'The selected IP patch was reapplied with the game update.'
+      );
     }
-    setUpdateTask(item.kind, 'current', item.kind === 'patch' ? 'IP patch is up to date.' : 'OpenShores game files are up to date.');
+    setUpdateTask(
+      item.kind,
+      'current',
+      item.kind === 'patch'
+        ? state.ipPatchRelease === 'none' ? 'The IP patch is disabled.' : 'IP patch is up to date.'
+        : 'OpenShores game files are up to date.'
+    );
   } catch (error) {
     const message = error?.message || String(error);
     setUpdateTask(item.kind, 'error', message);
@@ -848,7 +864,9 @@ async function loadPatchReleases() {
   try {
     const releases = await window.launcher.getPatchReleases();
     const selected = state?.ipPatchRelease || 'latest';
-    select.replaceChildren(new Option('Latest Release', 'latest'));
+    const latest = releases.find(release => !release.prerelease);
+    latestPatchLabel = latest ? `Latest Release (${latest.name})` : 'Latest Release';
+    select.replaceChildren(new Option(latestPatchLabel, 'latest'));
     for (const release of releases) {
       const date = release.publishedAt
         ? new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' }).format(new Date(release.publishedAt))
@@ -858,7 +876,11 @@ async function loadPatchReleases() {
       if (!release.hasZip) option.textContent += ' — no ZIP asset';
       select.add(option);
     }
+    const disabledOption = new Option('Disable IP Patch', 'none');
+    disabledOption.className = 'patch-option-disabled';
+    select.add(disabledOption);
     select.value = selected;
+    if (state) render();
   } catch (error) {
     showError(`Could not load IP patch releases: ${error?.message || String(error)}`);
   } finally {

@@ -161,6 +161,8 @@ h1 { margin: 4px 0 0; font-family: "Arial Narrow", "Segoe UI", sans-serif; font-
 .setting-control select { width: 190px; height: 34px; padding: 0 28px 0 10px; border: 1px solid #555; border-radius: 2px; color: #ddd; background: #292929; font: inherit; font-size: 10px; }
 .setting-control select:focus { border-color: #5c9ab8; outline: none; }
 .setting-control select:disabled { opacity: .45; }
+.setting-control select.disabled-selection { border-color: #9a7044; color: #f2b36b; }
+.setting-control select option.patch-option-disabled { color: #f2b36b; font-weight: 600; }
 .links { display: flex; align-items: center; gap: 18px; margin-top: 9px; }
 .links button { padding: 0; font-size: 9px; }
 .creator-credit { margin-left: auto; color: #737373; font-size: 9px; }

@@ -3,7 +3,6 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' asset: data:; style-src 'self'; script-src 'self'; connect-src ipc: http://ipc.localhost">
   <title>OpenShores Launcher</title>
   <link rel="stylesheet" href="styles.css">
 </head>
@@ -121,8 +120,8 @@
                 <label>Game installation folder</label>
                 <div class="path-row"><div id="install-path" class="path-value">—</div><button id="open-folder" class="secondary" disabled>Open folder</button><button id="choose-folder" class="secondary">Browse…</button></div>
               </div>
-              <div class="setting-row"><div><strong>IP patch release</strong><p>Use the newest release automatically, or pin a specific release.</p></div><div class="setting-control"><button id="refresh-patch-releases" class="refresh-icon-button" type="button" aria-label="Refresh IP patch releases" title="Refresh IP patch releases"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6v5h-5M4 18v-5h5M18.4 9A7 7 0 0 0 6.8 6.4L4 9m16 6-2.8 2.6A7 7 0 0 1 5.6 15"/></svg></button><select id="patch-release" aria-label="IP patch release"><option value="latest">Latest Release</option></select><span class="update-button-wrap" data-tooltip=""><button id="update-patch" class="secondary update-task-button"><span class="button-label">Update patch</span><span class="button-progress"></span></button></span></div></div>
-              <div class="setting-row"><div><strong>Refresh game files</strong><p>Verify clean source files, download changes, and reapply the selected IP patch.</p></div><span class="update-button-wrap" data-tooltip=""><button id="refresh-game" class="secondary update-task-button"><span class="button-label">Update game</span><span class="button-progress"></span></button></span></div>
+              <div class="setting-row"><div><strong>IP patch release</strong><p>Use the newest release automatically, pin a specific release, or disable the patch.</p></div><div class="setting-control"><button id="refresh-patch-releases" class="refresh-icon-button" type="button" aria-label="Refresh IP patch releases" title="Refresh IP patch releases"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6v5h-5M4 18v-5h5M18.4 9A7 7 0 0 0 6.8 6.4L4 9m16 6-2.8 2.6A7 7 0 0 1 5.6 15"/></svg></button><select id="patch-release" aria-label="IP patch release"><option value="latest">Latest Release</option><option class="patch-option-disabled" value="none">Disable IP Patch</option></select><span class="update-button-wrap" data-tooltip=""><button id="update-patch" class="secondary update-task-button"><span class="button-label">Update patch</span><span class="button-progress"></span></button></span></div></div>
+              <div class="setting-row"><div><strong>Refresh game files</strong><p>Verify clean source files, download changes, and apply the selected IP patch setting.</p></div><span class="update-button-wrap" data-tooltip=""><button id="refresh-game" class="secondary update-task-button"><span class="button-label">Update game</span><span class="button-progress"></span></button></span></div>
               <div class="setting-row danger-row"><div><strong>Uninstall game</strong><p>Remove only launcher-managed files from the selected folder.</p></div><button id="uninstall" class="danger">Uninstall</button></div>
             </div>
           </div>

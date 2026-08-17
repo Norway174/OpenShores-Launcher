@@ -5,10 +5,15 @@
   "author": "Norway174",
   "license": "",
   "scripts": {
+    "dev": "cargo tauri dev",
+    "dev:frontend": "vite src/renderer --host 127.0.0.1 --port 1420 --strictPort",
     "start": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-tauri.ps1",
     "test": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-tauri.ps1",
     "build": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-tauri.ps1",
     "dist": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-tauri.ps1",
     "dist:linux": "rm -rf dist && mkdir dist && NO_STRIP=true cargo tauri build -b appimage"
+  },
+  "devDependencies": {
+    "vite": "^8.2.1"
   }
 }
