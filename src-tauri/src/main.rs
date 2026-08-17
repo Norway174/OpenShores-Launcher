@@ -2744,7 +2744,8 @@ fn install_launcher_update_sync(app: &AppHandle, state: &AppState) -> LauncherRe
         format!("Installing launcher {}...", pending.version),
     );
     
-    if cfg!(target_os = "windows") {
+    #[cfg(windows)]
+    {
         let target = env::current_exe().map_err(error_string)?;
         let temp = launcher_temp_path()?;
         fs::create_dir_all(&temp).map_err(error_string)?;
@@ -2798,7 +2799,10 @@ fn install_launcher_update_sync(app: &AppHandle, state: &AppState) -> LauncherRe
             thread::sleep(Duration::from_millis(250));
             app.exit(0);
         });
-    } else {
+    }
+    
+    #[cfg(target_os = "linux")]
+    {
         // Can't use current_exe() b/c we're in an AppImage, $APPIMAGE is
         // set to the path of the actual AppImage file.
         let target = env::var("APPIMAGE").map_err(error_string)?;
