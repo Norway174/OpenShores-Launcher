@@ -35,11 +35,17 @@ use std::os::windows::process::CommandExt;
 #[cfg(windows)]
 use winreg::{enums::HKEY_CURRENT_USER, RegKey};
 
+#[cfg(target_os = "linux")]
+use std::os::unix::process::CommandExt;
+
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::PermissionsExt;
+
 const GAME_MANIFEST_URL: &str = "https://openshores.net/downloads/manifest.json";
 const PATCH_RELEASE_API: &str =
     "https://api.github.com/repos/Celarious/OpenShores-IP-Patch/releases?per_page=100";
 const LAUNCHER_RELEASE_API: &str =
-    "https://api.github.com/repos/Norway174/OpenShores-Launcher/releases/latest";
+    "https://api.github.com/repos/dgcole/OpenShores-Launcher/releases/latest";
 const GAME_EXE: &str = "Shores of Hazeron.exe";
 const GAME_DLL: &str = "AuLoginClient13.dll";
 const MANIFEST_FILE: &str = ".openshores-launcher.json";
@@ -1886,10 +1892,11 @@ fn check_updates_sync(
             message: "Launcher is up to date.".to_string(),
         });
     }
+    let binary_name = if cfg!(target_os = "linux") { "OpenShores-Launcher-amd64.AppImage" } else { "OpenShores-Launcher.exe" };
     let asset = release
         .assets
         .iter()
-        .find(|asset| asset.name.eq_ignore_ascii_case("OpenShores-Launcher.exe"))
+        .find(|asset| asset.name.eq_ignore_ascii_case(binary_name))
         .ok_or_else(|| {
             format!("Launcher {release_version} does not include a portable Windows executable.")
         })?;
@@ -2736,59 +2743,80 @@ fn install_launcher_update_sync(app: &AppHandle, state: &AppState) -> LauncherRe
         "installing",
         format!("Installing launcher {}...", pending.version),
     );
-    let target = env::current_exe().map_err(error_string)?;
-    let temp = launcher_temp_path()?;
-    fs::create_dir_all(&temp).map_err(error_string)?;
-    let batch_path = temp.join("apply-launcher-update.bat");
-    let error_log = launcher_data_path()?.join("update-error.log");
-    let script = [
-        "@echo off".to_string(),
-        "setlocal".to_string(),
-        format!("set \"LAUNCHER_PID={}\"", std::process::id()),
-        format!("set \"UPDATE_SOURCE={}\"", batch_escape(&destination)),
-        format!("set \"UPDATE_TARGET={}\"", batch_escape(&target)),
-        format!("set \"ERROR_LOG={}\"", batch_escape(&error_log)),
-        format!("rem Updating to {}", pending.version),
-        ":wait_for_launcher".to_string(),
-        "tasklist /FI \"PID eq %LAUNCHER_PID%\" 2>NUL | find \"%LAUNCHER_PID%\" >NUL".to_string(),
-        "if not errorlevel 1 ( ping 127.0.0.1 -n 2 >NUL & goto wait_for_launcher )".to_string(),
-        "set \"REPLACE_ATTEMPTS=0\"".to_string(),
-        ":replace_launcher".to_string(),
-        "copy /Y \"%UPDATE_SOURCE%\" \"%UPDATE_TARGET%\" >NUL 2>&1".to_string(),
-        "if not errorlevel 1 goto replacement_complete".to_string(),
-        "set /A REPLACE_ATTEMPTS+=1".to_string(),
-        "if %REPLACE_ATTEMPTS% GEQ 30 goto replacement_failed".to_string(),
-        "ping 127.0.0.1 -n 2 >NUL".to_string(),
-        "goto replace_launcher".to_string(),
-        ":replacement_failed".to_string(),
-        "echo The launcher update could not replace the portable executable.>\"%ERROR_LOG%\""
-            .to_string(),
-        "start \"\" \"%UPDATE_TARGET%\"".to_string(),
-        "exit /b 1".to_string(),
-        ":replacement_complete".to_string(),
-        "del /Q \"%UPDATE_SOURCE%\" >NUL 2>&1".to_string(),
-        "del /Q \"%ERROR_LOG%\" >NUL 2>&1".to_string(),
-        "start \"\" \"%UPDATE_TARGET%\"".to_string(),
-        "(goto) 2>NUL & del \"%~f0\"".to_string(),
-        String::new(),
-    ]
-    .join("\r\n");
-    fs::write(&batch_path, script).map_err(error_string)?;
-    let mut command = Command::new("cmd.exe");
-    command
-        .args(["/d", "/c"])
-        .arg(&batch_path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    #[cfg(windows)]
-    command.creation_flags(CREATE_NO_WINDOW);
-    command.spawn().map_err(error_string)?;
-    let app = app.clone();
-    thread::spawn(move || {
-        thread::sleep(Duration::from_millis(250));
-        app.exit(0);
-    });
+    
+    if cfg!(target_os = "windows") {
+        let target = env::current_exe().map_err(error_string)?;
+        let temp = launcher_temp_path()?;
+        fs::create_dir_all(&temp).map_err(error_string)?;
+        let batch_path = temp.join("apply-launcher-update.bat");
+        let error_log = launcher_data_path()?.join("update-error.log");
+        let script = [
+            "@echo off".to_string(),
+            "setlocal".to_string(),
+            format!("set \"LAUNCHER_PID={}\"", std::process::id()),
+            format!("set \"UPDATE_SOURCE={}\"", batch_escape(&destination)),
+            format!("set \"UPDATE_TARGET={}\"", batch_escape(&target)),
+            format!("set \"ERROR_LOG={}\"", batch_escape(&error_log)),
+            format!("rem Updating to {}", pending.version),
+            ":wait_for_launcher".to_string(),
+            "tasklist /FI \"PID eq %LAUNCHER_PID%\" 2>NUL | find \"%LAUNCHER_PID%\" >NUL".to_string(),
+            "if not errorlevel 1 ( ping 127.0.0.1 -n 2 >NUL & goto wait_for_launcher )".to_string(),
+            "set \"REPLACE_ATTEMPTS=0\"".to_string(),
+            ":replace_launcher".to_string(),
+            "copy /Y \"%UPDATE_SOURCE%\" \"%UPDATE_TARGET%\" >NUL 2>&1".to_string(),
+            "if not errorlevel 1 goto replacement_complete".to_string(),
+            "set /A REPLACE_ATTEMPTS+=1".to_string(),
+            "if %REPLACE_ATTEMPTS% GEQ 30 goto replacement_failed".to_string(),
+            "ping 127.0.0.1 -n 2 >NUL".to_string(),
+            "goto replace_launcher".to_string(),
+            ":replacement_failed".to_string(),
+            "echo The launcher update could not replace the portable executable.>\"%ERROR_LOG%\""
+                .to_string(),
+            "start \"\" \"%UPDATE_TARGET%\"".to_string(),
+            "exit /b 1".to_string(),
+            ":replacement_complete".to_string(),
+            "del /Q \"%UPDATE_SOURCE%\" >NUL 2>&1".to_string(),
+            "del /Q \"%ERROR_LOG%\" >NUL 2>&1".to_string(),
+            "start \"\" \"%UPDATE_TARGET%\"".to_string(),
+            "(goto) 2>NUL & del \"%~f0\"".to_string(),
+            String::new(),
+        ]
+        .join("\r\n");
+        fs::write(&batch_path, script).map_err(error_string)?;
+        let mut command = Command::new("cmd.exe");
+        command
+            .args(["/d", "/c"])
+            .arg(&batch_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        #[cfg(windows)]
+        command.creation_flags(CREATE_NO_WINDOW);
+        command.spawn().map_err(error_string)?;
+        let app = app.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(250));
+            app.exit(0);
+        });
+    } else {
+        // Can't use current_exe() b/c we're in an AppImage, $APPIMAGE is
+        // set to the path of the actual AppImage file.
+        let target = env::var("APPIMAGE").map_err(error_string)?;
+
+        // Make executable
+        println!("destination: {destination:?}");
+        println!("target: {target:?}");
+        let metadata = fs::metadata(&destination).map_err(error_string)?;
+        let mut permissions = metadata.permissions();
+        permissions.set_mode(permissions.mode() | 0o111);
+        fs::set_permissions(&destination, permissions).map_err(error_string)?;
+
+        fs::rename(&destination, &target).map_err(error_string)?;
+
+        // Replace current process with new version
+        let error = Command::new(&target).exec();
+        return Err(error_string(error));
+    }
     Ok(true)
 }
 
