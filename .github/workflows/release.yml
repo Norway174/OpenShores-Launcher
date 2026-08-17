@@ -108,6 +108,8 @@ jobs:
         with:
           name: artifact-linux
           path: OpenShores-Launcher-amd64.AppImage
+      - name: Print working directory
+        run: pwd; env
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
@@ -117,5 +119,5 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
-            OpenShores-Launcher/OpenShores-Launcher.exe
-            OpenShores-Launcher/OpenShores-Launcher-amd64.AppImage
+            */**/OpenShores-Launcher.exe
+            */**/OpenShores-Launcher-amd64.AppImage
