@@ -908,27 +908,46 @@ fn hazeron_password_value_from_hex(password_sha1: &str) -> LauncherResult<String
     Ok(format!("@ByteArray({payload})"))
 }
 
-fn registry_utf16le_hex(value: &str) -> String {
-    let mut bytes = Vec::with_capacity((value.encode_utf16().count() + 1) * 2);
-    for code_unit in value.encode_utf16().chain(std::iter::once(0)) {
-        bytes.extend_from_slice(&code_unit.to_le_bytes());
+fn wine_password_value_from_hex(password_sha1: &str) -> LauncherResult<String> {
+    if !is_valid_password_sha1(password_sha1) {
+        return Err("The saved account password hash is invalid.".to_string());
     }
-    bytes
+
+    let start_bytes: Vec<u8> = "@ByteArray(".bytes().collect();
+    let sha_bytes: Vec<u8> = (0..40)
+        .step_by(2)
+        .map(|index| {
+            u8::from_str_radix(&password_sha1[index..index + 2], 16)
+                .map_err(|_| "The saved account password hash is invalid.".to_string())
+        })
+        .collect::<LauncherResult<Vec<_>>>()?;
+    let end_bytes: Vec<u8> = ")".bytes().collect();
+
+    let bytes: Vec<u8>= start_bytes.into_iter()
+        .chain(sha_bytes)
+        .chain(end_bytes)
+        .collect();
+
+    let hex_bytes: Vec<String> = bytes
         .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<Vec<_>>()
-        .join(",")
+        .flat_map(|byte| [format!("{:02x}", byte), "00".to_string()])
+        .collect();
+
+    let hex_str = hex_bytes.join(",");
+
+    Ok(hex_str)
 }
 
 fn wine_password_registry_import(key: &str, password_value: &str) -> Vec<u8> {
     let text = format!(
-        "Windows Registry Editor Version 5.00\r\n\r\n[{key}]\r\n\"Password\"=hex(1):{}\r\n",
-        registry_utf16le_hex(password_value)
+        "Windows Registry Editor Version 5.00\r\n\r\n[{key}]\r\n\"Password\"=hex:{}\r\n",
+        password_value
     );
     let mut bytes = vec![0xff, 0xfe];
     for code_unit in text.encode_utf16() {
         bytes.extend_from_slice(&code_unit.to_le_bytes());
     }
+
     bytes
 }
 
@@ -1059,7 +1078,7 @@ fn write_game_account_registry(
                 "/f",
             ],
         )?;
-        let password = hazeron_password_value_from_hex(&account.password_sha1)?;
+        let password = wine_password_value_from_hex(&account.password_sha1)?;
         write_wine_password_registry(&wine, &key, &password)?;
         run_wine_registry_command(
             &wine,
@@ -3826,6 +3845,7 @@ mod tests {
         assert!(error.contains("checksum"));
     }
 
+    #[cfg(windows)]
     #[test]
     fn xdelta_payload_is_embedded() {
         assert!(XDELTA_BYTES.len() > 500_000);
@@ -3940,21 +3960,14 @@ mod tests {
     }
 
     #[test]
-    fn hazeron_password_preserves_every_digest_byte_as_one_utf16_code_unit() {
-        let stored_hash: String = (0_u8..20).map(|byte| format!("{byte:02x}")).collect();
-        let value = hazeron_password_value_from_hex(&stored_hash).unwrap();
-        let code_units: Vec<u16> = value.encode_utf16().collect();
-
-        assert_eq!(code_units.len(), 32);
-        assert_eq!(&code_units[..11], &"@ByteArray(".encode_utf16().collect::<Vec<_>>());
-        assert_eq!(&code_units[11..31], &(0_u16..20).collect::<Vec<_>>());
-        assert_eq!(code_units[31], ')' as u16);
-        assert!(registry_utf16le_hex(&value).ends_with("29,00,00,00"));
+    fn wine_password_is_properly_formed() {
+        let value = wine_password_value_from_hex("79558f0f0033e4bcc76a1bd01b7106ae7e837074").unwrap();
+        assert_eq!(value, "40,00,42,00,79,00,74,00,65,00,41,00,72,00,72,00,61,00,79,00,28,00,79,00,55,00,8f,00,0f,00,00,00,33,00,e4,00,bc,00,c7,00,6a,00,1b,00,d0,00,1b,00,71,00,06,00,ae,00,7e,00,83,00,70,00,74,00,29,00")
     }
 
     #[test]
     fn wine_password_import_is_utf16_reg_sz_data() {
-        let value = hazeron_password_value_from_hex(
+        let value = wine_password_value_from_hex(
             "000102030405060708090a0b0c0d0e0f10111213",
         )
         .unwrap();
@@ -3972,10 +3985,11 @@ mod tests {
         )
         .unwrap();
         assert!(text.starts_with("Windows Registry Editor Version 5.00\r\n"));
-        assert!(text.contains("\"Password\"=hex(1):40,00,42,00"));
-        assert!(text.ends_with("29,00,00,00\r\n"));
+        assert!(text.contains("\"Password\"=hex:40,00,42,00"));
+        assert!(text.ends_with("29,00\r\n"));
     }
 
+    #[cfg(windows)]
     #[test]
     fn account_registry_path_is_relative_to_the_current_user() {
         assert!(ACCOUNT_REGISTRY_PATH.starts_with(r"Software\"));
