@@ -28,6 +28,7 @@ use std::{
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use which::which;
+use typed_path::WindowsPath;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -1611,10 +1612,13 @@ fn collect_files_with_extension(
 }
 
 fn normalized_xdelta_source_name(value: &str) -> Option<String> {
+    // Source filenames from xdelta3 will be Windows paths - typed-path is used to get
+    // the same parsing behavior on Linux.
+
     let filename = value.split('#').next()?.trim();
-    let path = Path::new(filename);
-    let extension = path.extension()?.to_string_lossy();
-    let mut stem = path.file_stem()?.to_string_lossy().trim().to_string();
+    let path = WindowsPath::new(filename);
+    let extension = str::from_utf8(path.extension()?).ok()?;
+    let mut stem = str::from_utf8(path.file_stem()?).ok()?.to_string();
     for suffix in [" old", " new", " patched"] {
         if stem.to_ascii_lowercase().ends_with(suffix) {
             stem.truncate(stem.len() - suffix.len());
@@ -1722,7 +1726,12 @@ fn apply_xdeltas(game_root: &Path) -> LauncherResult<(usize, usize)> {
         fs::remove_file(&delta).map_err(error_string)?;
         applied += 1;
     }
-    Ok((applied, skipped))
+
+    if applied == 0 {
+        Err("Failed to apply any patches".to_string())
+    } else {
+        Ok((applied, skipped))
+    }
 }
 
 fn unique_token() -> String {

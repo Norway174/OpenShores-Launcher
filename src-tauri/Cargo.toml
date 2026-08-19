@@ -27,6 +27,7 @@ tauri-plugin-os = "2.3.2"
 time = { version = "0.3", features = ["formatting"] }
 zip = { version = "8.1.0", default-features = false, features = ["deflate"] }
 which = "8.0.5"
+typed-path = "0.12"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
