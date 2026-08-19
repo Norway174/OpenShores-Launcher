@@ -2549,6 +2549,7 @@ dependencies = [
  "tauri-plugin-os",
  "tauri-plugin-single-instance",
  "time",
+ "typed-path",
  "which",
  "winreg",
  "zip",
