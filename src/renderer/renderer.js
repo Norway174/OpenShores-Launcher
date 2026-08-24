@@ -72,8 +72,9 @@ let logActionBusy = false;
 let logFilesBusy = false;
 let logGeneration = 0;
 let logRenderFrame = null;
-const LOG_LINE_HEIGHT = 16;
 const LOG_RENDER_OVERSCAN = 80;
+const LOG_FONT_SIZE_MIN = 8;
+const LOG_FONT_SIZE_MAX = 24;
 let serverRefreshBusy = false;
 let registering = false;
 const launchingProcesses = new Set();
@@ -360,20 +361,26 @@ function createLogRow(lineIndex, filter) {
     return row;
 }
 
+function getLogLineHeight(output = $('#log-output')) {
+  const lineHeight = Number.parseFloat(window.getComputedStyle(output).lineHeight);
+  return Number.isFinite(lineHeight) && lineHeight > 0 ? lineHeight : 16;
+}
+
 function renderLog(scrollToEnd = false) {
   const output = $('#log-output');
   const filter = $('#log-filter').value.trim();
   const visibleCount = filteredLogIndices ? filteredLogIndices.length : logLines.length;
-  const viewportLines = Math.ceil(output.clientHeight / LOG_LINE_HEIGHT);
-  const targetScrollTop = scrollToEnd ? Math.max(0, visibleCount * LOG_LINE_HEIGHT - output.clientHeight) : output.scrollTop;
-  const first = Math.max(0, Math.floor(targetScrollTop / LOG_LINE_HEIGHT) - LOG_RENDER_OVERSCAN);
+  const lineHeight = getLogLineHeight(output);
+  const viewportLines = Math.ceil(output.clientHeight / lineHeight);
+  const targetScrollTop = scrollToEnd ? Math.max(0, visibleCount * lineHeight - output.clientHeight) : output.scrollTop;
+  const first = Math.max(0, Math.floor(targetScrollTop / lineHeight) - LOG_RENDER_OVERSCAN);
   const last = Math.min(visibleCount, first + viewportLines + LOG_RENDER_OVERSCAN * 2);
   const fragment = document.createDocumentFragment();
 
   if (visibleCount) {
     const topSpacer = document.createElement('div');
     topSpacer.className = 'log-virtual-spacer';
-    topSpacer.style.height = `${first * LOG_LINE_HEIGHT}px`;
+    topSpacer.style.height = `${first * lineHeight}px`;
     fragment.append(topSpacer);
     for (let position = first; position < last; position += 1) {
       const lineIndex = filteredLogIndices ? filteredLogIndices[position] : position;
@@ -381,7 +388,7 @@ function renderLog(scrollToEnd = false) {
     }
     const bottomSpacer = document.createElement('div');
     bottomSpacer.className = 'log-virtual-spacer';
-    bottomSpacer.style.height = `${(visibleCount - last) * LOG_LINE_HEIGHT}px`;
+    bottomSpacer.style.height = `${(visibleCount - last) * lineHeight}px`;
     fragment.append(bottomSpacer);
   }
 
@@ -1340,6 +1347,21 @@ $('#log-output').addEventListener('scroll', () => {
     renderLog();
   });
 });
+$('#log-output').addEventListener('wheel', event => {
+  if (!event.ctrlKey || event.deltaY === 0) return;
+  event.preventDefault();
+  const output = event.currentTarget;
+  const oldLineHeight = getLogLineHeight(output);
+  const wasAtBottom = output.scrollHeight - output.scrollTop - output.clientHeight < 30;
+  const anchorLine = output.scrollTop / oldLineHeight;
+  const currentSize = Number.parseFloat(window.getComputedStyle(output).fontSize);
+  const direction = event.deltaY < 0 ? 1 : -1;
+  if ((direction > 0 && currentSize >= LOG_FONT_SIZE_MAX) || (direction < 0 && currentSize <= LOG_FONT_SIZE_MIN)) return;
+  const nextSize = Math.min(LOG_FONT_SIZE_MAX, Math.max(LOG_FONT_SIZE_MIN, currentSize + direction));
+  document.documentElement.style.setProperty('--log-font-size', `${nextSize}px`);
+  if (!wasAtBottom) output.scrollTop = anchorLine * getLogLineHeight(output);
+  renderLog(wasAtBottom);
+}, { passive: false });
 $('#log-file-select').addEventListener('pointerdown', () => refreshLogFiles());
 $('#log-file-select').addEventListener('keydown', event => {
   if (event.key === 'Enter' || event.key === ' ' || (event.altKey && event.key === 'ArrowDown')) refreshLogFiles();

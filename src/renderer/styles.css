@@ -11,6 +11,7 @@
   --blue-hover: #3293c2;
   --green: #63c68b;
   --red: #7d0000;
+  --log-font-size: 10px;
 }
 
 * { box-sizing: border-box; }
@@ -236,9 +237,9 @@ h1 { margin: 4px 0 0; font-family: "Arial Narrow", "Segoe UI", sans-serif; font-
 .log-sidebar .log-status { margin-bottom: 5px; line-height: 1.35; }
 .log-sidebar button { width: 100%; min-width: 0; min-height: 34px; padding: 0 10px; font-size: 10px; }
 .log-sidebar #clear-log { margin-top: auto; }
-.log-output { min-height: 0; flex: 1; overflow: auto; padding: 9px 0; border: 1px solid var(--line); color: #c8c8c8; background: #171717; font-family: Consolas, "Cascadia Mono", monospace; font-size: 10px; line-height: 16px; cursor: text; user-select: text; -webkit-user-select: text; }
+.log-output { min-height: 0; flex: 1; overflow: auto; padding: 9px 0; border: 1px solid var(--line); color: #c8c8c8; background: #171717; font-family: Consolas, "Cascadia Mono", monospace; font-size: var(--log-font-size); line-height: 1.6; cursor: text; user-select: text; -webkit-user-select: text; }
 .log-output:focus { border-color: #4b6876; outline: none; }
-.log-line { height: 16px; display: flex; padding: 0 10px 0 0; white-space: pre; }
+.log-line { height: 1.6em; display: flex; padding: 0 10px 0 0; white-space: pre; }
 .log-line:hover { background: rgba(255, 255, 255, .035); }
 .log-line-number { width: 46px; flex: 0 0 46px; margin-right: 10px; padding-right: 9px; color: #555; text-align: right; user-select: none; border-right: 1px solid #2b2b2b; }
 .log-line-content { min-width: 0; flex: 0 0 auto; }
