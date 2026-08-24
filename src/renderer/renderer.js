@@ -8,6 +8,7 @@ window.launcher = {
   getState: () => invoke('get_state'),
   listLogFiles: () => invoke('list_log_files'),
   setSelectedLogFile: path => invoke('set_selected_log_file', { path }),
+  setLogFontSize: size => invoke('set_log_font_size', { size }),
   readClientLog: offset => invoke('read_client_log', { offset }),
   clearClientLog: () => invoke('clear_client_log'),
   chooseFolder: () => invoke('choose_folder'),
@@ -72,6 +73,8 @@ let logActionBusy = false;
 let logFilesBusy = false;
 let logGeneration = 0;
 let logRenderFrame = null;
+let logFontSaveTimer = null;
+let pendingLogFontSize = null;
 const LOG_RENDER_OVERSCAN = 80;
 const LOG_FONT_SIZE_MIN = 8;
 const LOG_FONT_SIZE_MAX = 24;
@@ -118,6 +121,20 @@ function applyTheme(themeId, css) {
   link.rel = 'stylesheet';
   link.href = appliedThemeUrl;
   document.head.appendChild(link);
+}
+
+function applyLogFontSize(size) {
+  let setting = $('#log-font-size-setting');
+  if (size == null) {
+    setting?.remove();
+    return;
+  }
+  if (!setting) {
+    setting = document.createElement('style');
+    setting.id = 'log-font-size-setting';
+  }
+  setting.textContent = `:root { --log-font-size: ${size}px; }`;
+  document.head.insertBefore(setting, $('#active-theme-stylesheet'));
 }
 
 function closeThemeMenus() {
@@ -730,6 +747,7 @@ function render(nextState = state) {
   if (!nextState) return;
   state = nextState;
   applyTheme(themePreviewCss === null ? state.selectedTheme : 'theme-preview', themePreviewCss ?? state.themeCss ?? '');
+  applyLogFontSize(pendingLogFontSize ?? state.logFontSize);
   $('.version').textContent = `v${state.launcherVersion}`;
   $('#section-nav').classList.remove('hidden');
   $('#startup-placeholder').classList.add('hidden');
@@ -1357,10 +1375,30 @@ $('#log-output').addEventListener('wheel', event => {
   const currentSize = Number.parseFloat(window.getComputedStyle(output).fontSize);
   const direction = event.deltaY < 0 ? 1 : -1;
   if ((direction > 0 && currentSize >= LOG_FONT_SIZE_MAX) || (direction < 0 && currentSize <= LOG_FONT_SIZE_MIN)) return;
-  const nextSize = Math.min(LOG_FONT_SIZE_MAX, Math.max(LOG_FONT_SIZE_MIN, currentSize + direction));
-  document.documentElement.style.setProperty('--log-font-size', `${nextSize}px`);
+  const steppedSize = direction > 0 ? Math.floor(currentSize) + 1 : Math.ceil(currentSize) - 1;
+  const nextSize = Math.min(LOG_FONT_SIZE_MAX, Math.max(LOG_FONT_SIZE_MIN, steppedSize));
+  pendingLogFontSize = nextSize;
+  applyLogFontSize(nextSize);
   if (!wasAtBottom) output.scrollTop = anchorLine * getLogLineHeight(output);
   renderLog(wasAtBottom);
+  window.clearTimeout(logFontSaveTimer);
+  logFontSaveTimer = window.setTimeout(async () => {
+    const sizeToSave = pendingLogFontSize;
+    try {
+      await window.launcher.setLogFontSize(sizeToSave);
+      if (pendingLogFontSize === sizeToSave) {
+        state = { ...state, logFontSize: sizeToSave };
+        pendingLogFontSize = null;
+      }
+    } catch (error) {
+      if (pendingLogFontSize === sizeToSave) {
+        pendingLogFontSize = null;
+        applyLogFontSize(state?.logFontSize);
+        renderLog(wasAtBottom);
+      }
+      showError(error);
+    }
+  }, 180);
 }, { passive: false });
 $('#log-file-select').addEventListener('pointerdown', () => refreshLogFiles());
 $('#log-file-select').addEventListener('keydown', event => {

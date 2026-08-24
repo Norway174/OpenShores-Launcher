@@ -69,6 +69,8 @@ const POST_LAUNCH_MINIMIZE: &str = "minimize";
 const POST_LAUNCH_EXIT: &str = "exit";
 const POST_LAUNCH_OPEN_LOGS: &str = "open_logs";
 const MAX_THEME_SIZE: usize = 1024 * 1024;
+const LOG_FONT_SIZE_MIN: u8 = 8;
+const LOG_FONT_SIZE_MAX: u8 = 24;
 const DEFAULT_DARK_CSS: &str = include_str!("../../src/renderer/styles.css");
 
 // OS-specific constants
@@ -138,6 +140,12 @@ struct LauncherConfig {
         skip_serializing_if = "Option::is_none"
     )]
     selected_log_file: Option<String>,
+    #[serde(
+        rename = "logFontSize",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    log_font_size: Option<u8>,
     #[serde(rename = "selectedTheme", default = "default_theme")]
     selected_theme: String,
     #[serde(rename = "gameLaunchAction", default = "default_post_launch_action")]
@@ -157,6 +165,7 @@ impl Default for LauncherConfig {
             accounts: Vec::new(),
             developer_mode: false,
             selected_log_file: None,
+            log_font_size: None,
             selected_theme: default_theme(),
             game_launch_action: default_post_launch_action(),
             designer_launch_action: default_post_launch_action(),
@@ -247,6 +256,7 @@ struct LauncherSnapshot {
     connected_server_id: Option<String>,
     account_username: Option<String>,
     developer_mode: bool,
+    log_font_size: Option<u8>,
     selected_theme: String,
     game_launch_action: String,
     designer_launch_action: String,
@@ -641,6 +651,13 @@ fn load_config() -> LauncherResult<LauncherConfig> {
         config.designer_launch_action = default_post_launch_action();
         changed = true;
     }
+    if config
+        .log_font_size
+        .is_some_and(|size| !(LOG_FONT_SIZE_MIN..=LOG_FONT_SIZE_MAX).contains(&size))
+    {
+        config.log_font_size = None;
+        changed = true;
+    }
     let server_ids: Vec<String> = config
         .servers
         .as_ref()
@@ -701,6 +718,17 @@ fn save_developer_mode(enabled: bool) -> LauncherResult<()> {
 fn save_selected_log_file(path: Option<String>) -> LauncherResult<()> {
     let mut config = load_config()?;
     config.selected_log_file = path;
+    write_json(&config_path()?, &config)
+}
+
+fn save_log_font_size(size: u8) -> LauncherResult<()> {
+    if !(LOG_FONT_SIZE_MIN..=LOG_FONT_SIZE_MAX).contains(&size) {
+        return Err(format!(
+            "Log font size must be between {LOG_FONT_SIZE_MIN} and {LOG_FONT_SIZE_MAX}."
+        ));
+    }
+    let mut config = load_config()?;
+    config.log_font_size = Some(size);
     write_json(&config_path()?, &config)
 }
 
@@ -789,6 +817,7 @@ fn get_snapshot(state: &AppState) -> LauncherResult<LauncherSnapshot> {
         connected_server_id: config.connected_server_id,
         account_username,
         developer_mode: config.developer_mode,
+        log_font_size: config.log_font_size,
         selected_theme: config.selected_theme,
         game_launch_action: config.game_launch_action,
         designer_launch_action: config.designer_launch_action,
@@ -2801,6 +2830,11 @@ fn set_selected_log_file(path: String) -> LauncherResult<()> {
     save_selected_log_file(Some(selected))
 }
 
+#[tauri::command]
+fn set_log_font_size(size: u8) -> LauncherResult<()> {
+    save_log_font_size(size)
+}
+
 fn read_client_log_sync(offset: u64) -> LauncherResult<ClientLogChunk> {
     let config = load_config()?;
     if !config.developer_mode {
@@ -3865,6 +3899,7 @@ fn main() {
             get_state,
             list_log_files,
             set_selected_log_file,
+            set_log_font_size,
             read_client_log,
             clear_client_log,
             choose_folder,
@@ -4142,6 +4177,7 @@ mod tests {
         assert_eq!(config.ip_patch_release, LATEST_PATCH_RELEASE);
         assert_eq!(config.applied_ip_patch_release, None);
         assert_eq!(config.servers, None);
+        assert_eq!(config.log_font_size, None);
         assert_eq!(config.game_launch_action, POST_LAUNCH_DO_NOTHING);
         assert_eq!(config.designer_launch_action, POST_LAUNCH_DO_NOTHING);
 
