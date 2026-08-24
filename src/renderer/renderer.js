@@ -6,6 +6,8 @@ const { listen } = window.__TAURI__.event;
 const { platform } = window.__TAURI__.os;
 window.launcher = {
   getState: () => invoke('get_state'),
+  listLogFiles: () => invoke('list_log_files'),
+  setSelectedLogFile: path => invoke('set_selected_log_file', { path }),
   readClientLog: offset => invoke('read_client_log', { offset }),
   clearClientLog: () => invoke('clear_client_log'),
   chooseFolder: () => invoke('choose_folder'),
@@ -60,11 +62,18 @@ let gameUpdateTimer = null;
 let logUpdateTimer = null;
 let logFilterTimer = null;
 let logText = '';
+let logLines = [];
+let logEndsWithNewline = false;
+let filteredLogIndices = null;
 let logOffset = 0;
 let logLoaded = false;
 let logReadBusy = false;
 let logActionBusy = false;
+let logFilesBusy = false;
 let logGeneration = 0;
+let logRenderFrame = null;
+const LOG_LINE_HEIGHT = 16;
+const LOG_RENDER_OVERSCAN = 80;
 let serverRefreshBusy = false;
 let registering = false;
 const launchingProcesses = new Set();
@@ -300,50 +309,135 @@ function appendHighlightedLogLine(target, line, filter) {
   appendSearchHighlights(target, line.slice(cursor), filter);
 }
 
-function renderLog(scrollToEnd = false) {
-  const output = $('#log-output');
-  const filter = $('#log-filter').value.trim();
-  const lines = logText ? logText.split(/\r?\n/) : [];
-  if (lines.at(-1) === '') lines.pop();
-  const visible = filter
-    ? lines.map((line, index) => ({ line, index })).filter(item => item.line.toLocaleLowerCase().includes(filter.toLocaleLowerCase()))
-    : lines.map((line, index) => ({ line, index }));
-  const fragment = document.createDocumentFragment();
+function rebuildLogFilter() {
+  const filter = $('#log-filter').value.trim().toLocaleLowerCase();
+  filteredLogIndices = filter
+    ? logLines.reduce((matches, line, index) => {
+        if (line.toLocaleLowerCase().includes(filter)) matches.push(index);
+        return matches;
+      }, [])
+    : null;
+}
 
-  for (const item of visible) {
+function setLogText(content, append = false) {
+  if (!append) {
+    logText = content;
+    logLines = content ? content.split(/\r?\n/) : [];
+    logEndsWithNewline = /(?:\r?\n)$/.test(content);
+    if (logEndsWithNewline) logLines.pop();
+  } else if (content) {
+    const prefix = logEndsWithNewline ? '' : (logLines.pop() || '');
+    logText += content;
+    const combined = prefix + content;
+    const additions = combined.split(/\r?\n/);
+    logEndsWithNewline = /(?:\r?\n)$/.test(combined);
+    if (logEndsWithNewline) additions.pop();
+    logLines.push(...additions);
+  }
+  rebuildLogFilter();
+}
+
+function createLogRow(lineIndex, filter) {
+    const line = logLines[lineIndex];
     const row = document.createElement('div');
     row.className = 'log-line';
-    const trimmedLine = item.line.trimStart();
+    const trimmedLine = line.trimStart();
     if (trimmedLine.startsWith('@@')) row.classList.add('log-diff-section');
     else if (trimmedLine.startsWith('+')) row.classList.add('log-diff-add');
     else if (trimmedLine.startsWith('-')) row.classList.add('log-diff-remove');
     else if (trimmedLine.startsWith('=')) row.classList.add('log-diff-equal');
-    else if (/\b(?:fatal|error|exception|failed|failure)\b/i.test(item.line)) row.classList.add('log-error');
-    else if (/\bwarn(?:ing)?\b/i.test(item.line)) row.classList.add('log-warning');
-    else if (/\bdebug\b/i.test(item.line)) row.classList.add('log-debug');
-    else if (/\btrace\b/i.test(item.line)) row.classList.add('log-trace');
+    else if (/\b(?:fatal|error|exception|failed|failure)\b/i.test(line)) row.classList.add('log-error');
+    else if (/\bwarn(?:ing)?\b/i.test(line)) row.classList.add('log-warning');
+    else if (/\bdebug\b/i.test(line)) row.classList.add('log-debug');
+    else if (/\btrace\b/i.test(line)) row.classList.add('log-trace');
     const number = document.createElement('span');
     number.className = 'log-line-number';
-    number.textContent = String(item.index + 1);
+    number.textContent = String(lineIndex + 1);
     const content = document.createElement('span');
     content.className = 'log-line-content';
-    appendHighlightedLogLine(content, item.line, filter);
+    appendHighlightedLogLine(content, line, filter);
     row.append(number, content);
-    fragment.append(row);
+    return row;
+}
+
+function renderLog(scrollToEnd = false) {
+  const output = $('#log-output');
+  const filter = $('#log-filter').value.trim();
+  const visibleCount = filteredLogIndices ? filteredLogIndices.length : logLines.length;
+  const viewportLines = Math.ceil(output.clientHeight / LOG_LINE_HEIGHT);
+  const targetScrollTop = scrollToEnd ? Math.max(0, visibleCount * LOG_LINE_HEIGHT - output.clientHeight) : output.scrollTop;
+  const first = Math.max(0, Math.floor(targetScrollTop / LOG_LINE_HEIGHT) - LOG_RENDER_OVERSCAN);
+  const last = Math.min(visibleCount, first + viewportLines + LOG_RENDER_OVERSCAN * 2);
+  const fragment = document.createDocumentFragment();
+
+  if (visibleCount) {
+    const topSpacer = document.createElement('div');
+    topSpacer.className = 'log-virtual-spacer';
+    topSpacer.style.height = `${first * LOG_LINE_HEIGHT}px`;
+    fragment.append(topSpacer);
+    for (let position = first; position < last; position += 1) {
+      const lineIndex = filteredLogIndices ? filteredLogIndices[position] : position;
+      fragment.append(createLogRow(lineIndex, filter));
+    }
+    const bottomSpacer = document.createElement('div');
+    bottomSpacer.className = 'log-virtual-spacer';
+    bottomSpacer.style.height = `${(visibleCount - last) * LOG_LINE_HEIGHT}px`;
+    fragment.append(bottomSpacer);
   }
 
   output.replaceChildren();
-  if (visible.length) output.append(fragment);
+  if (visibleCount) output.append(fragment);
   else {
     const empty = document.createElement('div');
     empty.className = 'log-empty';
-    empty.textContent = filter && lines.length ? 'No log entries match this filter.' : 'ClientInterface.log is empty.';
+    const selectedName = $('#log-file-select').selectedOptions[0]?.textContent || 'Selected log';
+    empty.textContent = filter && logLines.length ? 'No log entries match this filter.' : `${selectedName} is empty.`;
     output.append(empty);
   }
-  $('#log-match-count').textContent = filter ? `${visible.length} of ${lines.length} lines` : `${lines.length} lines`;
+  $('#log-match-count').textContent = filter ? `${visibleCount} of ${logLines.length} lines` : `${logLines.length} lines`;
   $('#copy-log').disabled = !logText;
   $('#clear-log').disabled = logActionBusy;
   if (scrollToEnd) output.scrollTop = output.scrollHeight;
+}
+
+async function refreshLogFiles() {
+  if (logFilesBusy || !state?.developerMode) return;
+  logFilesBusy = true;
+  const select = $('#log-file-select');
+  const previous = select.value;
+  try {
+    const files = await window.launcher.listLogFiles();
+    const selected = files.find(file => file.selected)?.path || '';
+    const fragment = document.createDocumentFragment();
+    if (!files.length) {
+      const option = document.createElement('option');
+      option.value = '';
+      option.textContent = 'No .log or .txt files found';
+      fragment.append(option);
+    } else {
+      for (const file of files) {
+        const option = document.createElement('option');
+        option.value = file.path;
+        option.textContent = file.name;
+        option.selected = file.path === selected;
+        fragment.append(option);
+      }
+    }
+    select.replaceChildren(fragment);
+    select.disabled = !files.length;
+    if (previous && previous !== select.value) {
+      logGeneration += 1;
+      logOffset = 0;
+      setLogText('');
+      renderLog(true);
+    }
+  } catch (error) {
+    const status = $('#log-status');
+    status.textContent = 'Log scan failed';
+    status.title = error?.message || String(error);
+  } finally {
+    logFilesBusy = false;
+  }
 }
 
 async function readClientLog(reset = false) {
@@ -357,14 +451,16 @@ async function readClientLog(reset = false) {
     const chunk = await window.launcher.readClientLog(requestedOffset);
     if (generation !== logGeneration) return;
     const changed = chunk.reset || requestedOffset === 0 || !!chunk.content;
-    logText = chunk.reset || requestedOffset === 0 ? chunk.content : logText + chunk.content;
+    setLogText(chunk.content, !(chunk.reset || requestedOffset === 0));
     logOffset = chunk.nextOffset;
     logLoaded = true;
     const status = $('#log-status');
-    status.textContent = state.gameRunning ? 'Watching live' : 'Game is not running';
-    status.classList.toggle('live', !!state.gameRunning);
+    const watchingFile = $('#log-view').classList.contains('active');
+    status.textContent = state.gameRunning ? 'Watching live' : watchingFile ? 'Watching file' : 'Game is not running';
+    status.classList.toggle('live', !!state.gameRunning || watchingFile);
     status.removeAttribute('title');
     if (changed && $('#log-view').classList.contains('active')) renderLog(reset || wasAtBottom);
+    if (chunk.hasMore) window.setTimeout(() => readClientLog(), 0);
   } catch (error) {
     const status = $('#log-status');
     status.textContent = 'Log unavailable';
@@ -377,8 +473,9 @@ async function readClientLog(reset = false) {
 
 function syncLogMonitoring() {
   const status = $('#log-status');
-  const shouldMonitor = !!state?.developerMode && !!state?.gameRunning;
-  status.textContent = shouldMonitor ? 'Watching live' : 'Game is not running';
+  const logViewActive = $('#log-view').classList.contains('active');
+  const shouldMonitor = !!state?.developerMode && (!!state?.gameRunning || logViewActive);
+  status.textContent = state?.gameRunning ? 'Watching live' : logViewActive ? 'Watching file' : 'Game is not running';
   status.classList.toggle('live', shouldMonitor);
   status.removeAttribute('title');
   if (shouldMonitor && !logUpdateTimer) {
@@ -925,8 +1022,9 @@ function switchView(viewName) {
   $(`#${viewName}-view`).classList.add('active');
   if (viewName === 'log') {
     renderLog(true);
-    readClientLog(true);
+    refreshLogFiles().then(() => readClientLog(true));
   }
+  syncLogMonitoring();
 }
 
 async function applyPostLaunchAction(process) {
@@ -1231,8 +1329,38 @@ $('#log-filter').addEventListener('input', () => {
   window.clearTimeout(logFilterTimer);
   logFilterTimer = window.setTimeout(() => {
     $('#log-output').scrollTop = 0;
+    rebuildLogFilter();
     renderLog();
   }, 100);
+});
+$('#log-output').addEventListener('scroll', () => {
+  if (logRenderFrame !== null) return;
+  logRenderFrame = window.requestAnimationFrame(() => {
+    logRenderFrame = null;
+    renderLog();
+  });
+});
+$('#log-file-select').addEventListener('pointerdown', () => refreshLogFiles());
+$('#log-file-select').addEventListener('keydown', event => {
+  if (event.key === 'Enter' || event.key === ' ' || (event.altKey && event.key === 'ArrowDown')) refreshLogFiles();
+});
+$('#log-file-select').addEventListener('change', async event => {
+  const selected = event.currentTarget.value;
+  if (!selected || logActionBusy) return;
+  logGeneration += 1;
+  logOffset = 0;
+  setLogText('');
+  renderLog(true);
+  try {
+    await window.launcher.setSelectedLogFile(selected);
+    await readClientLog(true);
+  } catch (error) {
+    const status = $('#log-status');
+    status.textContent = 'Could not select log';
+    status.classList.remove('live');
+    status.title = error?.message || String(error);
+    await refreshLogFiles();
+  }
 });
 $('#copy-log').addEventListener('click', async () => {
   if (!logText) return;
@@ -1262,7 +1390,7 @@ $('#clear-log').addEventListener('click', async () => {
   button.textContent = 'Clearing…';
   try {
     await window.launcher.clearClientLog();
-    logText = '';
+    setLogText('');
     logOffset = 0;
     logLoaded = true;
     renderLog();

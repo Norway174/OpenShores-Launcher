@@ -220,6 +220,9 @@ h1 { margin: 4px 0 0; font-family: "Arial Narrow", "Segoe UI", sans-serif; font-
 .log-view { padding: 14px 16px 16px; }
 .log-view.active { display: flex; flex-direction: column; }
 .log-header { flex: 0 0 auto; align-items: flex-end; margin-bottom: 6px; }
+.log-file-heading { min-width: 0; flex: 1; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+.log-file-heading select { width: 100%; max-width: 390px; height: 34px; padding: 0 28px 0 9px; border: 1px solid #494949; border-radius: 2px; color: #eee; background: #202020; font: inherit; font-size: 12px; }
+.log-file-heading select:focus { border-color: #5c9ab8; outline: none; }
 .log-status { display: flex; align-items: center; gap: 7px; color: #8f8f8f; font-size: 9px; letter-spacing: .7px; text-transform: uppercase; }
 .log-status::before { width: 6px; height: 6px; border-radius: 50%; content: ""; background: #777; }
 .log-status.live { color: #85d9a5; }
@@ -233,12 +236,13 @@ h1 { margin: 4px 0 0; font-family: "Arial Narrow", "Segoe UI", sans-serif; font-
 .log-sidebar .log-status { margin-bottom: 5px; line-height: 1.35; }
 .log-sidebar button { width: 100%; min-width: 0; min-height: 34px; padding: 0 10px; font-size: 10px; }
 .log-sidebar #clear-log { margin-top: auto; }
-.log-output { min-height: 0; flex: 1; overflow: auto; padding: 9px 0; border: 1px solid var(--line); color: #c8c8c8; background: #171717; font-family: Consolas, "Cascadia Mono", monospace; font-size: 10px; line-height: 1.55; cursor: text; user-select: text; -webkit-user-select: text; }
+.log-output { min-height: 0; flex: 1; overflow: auto; padding: 9px 0; border: 1px solid var(--line); color: #c8c8c8; background: #171717; font-family: Consolas, "Cascadia Mono", monospace; font-size: 10px; line-height: 16px; cursor: text; user-select: text; -webkit-user-select: text; }
 .log-output:focus { border-color: #4b6876; outline: none; }
-.log-line { min-height: 16px; display: flex; padding: 0 10px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.log-line { height: 16px; display: flex; padding: 0 10px 0 0; white-space: pre; }
 .log-line:hover { background: rgba(255, 255, 255, .035); }
 .log-line-number { width: 46px; flex: 0 0 46px; margin-right: 10px; padding-right: 9px; color: #555; text-align: right; user-select: none; border-right: 1px solid #2b2b2b; }
-.log-line-content { min-width: 0; }
+.log-line-content { min-width: 0; flex: 0 0 auto; }
+.log-virtual-spacer { width: 1px; pointer-events: none; }
 .log-line.log-error .log-line-content { color: #ef9b9b; }
 .log-line.log-warning .log-line-content { color: #e7c17d; }
 .log-line.log-debug .log-line-content, .log-line.log-trace .log-line-content { color: #8d9ba2; }

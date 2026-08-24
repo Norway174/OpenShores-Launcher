@@ -50,6 +50,7 @@ const LAUNCHER_RELEASE_API: &str =
 const GAME_EXE: &str = "Shores of Hazeron.exe";
 const GAME_DLL: &str = "AuLoginClient13.dll";
 const CLIENT_LOG: &str = "ClientInterface.log";
+const LOG_READ_CHUNK_SIZE: u64 = 1024 * 1024;
 const MANIFEST_FILE: &str = ".openshores-launcher.json";
 const MANAGED_BY: &str = "OpenShores Launcher";
 const LATEST_PATCH_RELEASE: &str = "latest";
@@ -131,6 +132,12 @@ struct LauncherConfig {
     accounts: Vec<SavedAccount>,
     #[serde(rename = "developerMode", default)]
     developer_mode: bool,
+    #[serde(
+        rename = "selectedLogFile",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    selected_log_file: Option<String>,
     #[serde(rename = "selectedTheme", default = "default_theme")]
     selected_theme: String,
     #[serde(rename = "gameLaunchAction", default = "default_post_launch_action")]
@@ -149,6 +156,7 @@ impl Default for LauncherConfig {
             connected_server_id: None,
             accounts: Vec::new(),
             developer_mode: false,
+            selected_log_file: None,
             selected_theme: default_theme(),
             game_launch_action: default_post_launch_action(),
             designer_launch_action: default_post_launch_action(),
@@ -313,6 +321,15 @@ struct ClientLogChunk {
     content: String,
     next_offset: u64,
     reset: bool,
+    has_more: bool,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LogFileOption {
+    path: String,
+    name: String,
+    selected: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -678,6 +695,12 @@ fn save_developer_mode(enabled: bool) -> LauncherResult<()> {
     if !enabled && config.game_launch_action == POST_LAUNCH_OPEN_LOGS {
         config.game_launch_action = default_post_launch_action();
     }
+    write_json(&config_path()?, &config)
+}
+
+fn save_selected_log_file(path: Option<String>) -> LauncherResult<()> {
+    let mut config = load_config()?;
+    config.selected_log_file = path;
     write_json(&config_path()?, &config)
 }
 
@@ -2080,6 +2103,14 @@ fn uninstall_game_sync(app: &AppHandle, state: &AppState) -> LauncherResult<Laun
     get_snapshot(state)
 }
 
+fn main_game_launch_arguments(developer_mode: bool) -> Vec<&'static str> {
+    let mut arguments = vec!["-launcher"];
+    if developer_mode {
+        arguments.push("-log");
+    }
+    arguments
+}
+
 fn launch_game_sync(
     app: &AppHandle,
     state: &AppState,
@@ -2122,7 +2153,9 @@ fn launch_game_sync(
         if let Some(mode) = designer_mode {
             command.arg(designer_launch_argument(mode)?);
         } else {
-            command.arg("-launcher");
+            for argument in main_game_launch_arguments(config.developer_mode) {
+                command.arg(argument);
+            }
             if let Some(server_id) = config.connected_server_id.as_deref() {
                 let server = server_by_id(&config, server_id)?;
                 let active_account = config
@@ -2608,24 +2641,179 @@ fn get_state(state: State<'_, AppState>) -> LauncherResult<LauncherSnapshot> {
     get_snapshot(state.inner())
 }
 
+fn is_log_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("log") || extension.eq_ignore_ascii_case("txt")
+        })
+}
+
+fn normalized_relative_log_path(path: &Path) -> Option<String> {
+    if path.as_os_str().is_empty()
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+        || !is_log_file(path)
+    {
+        return None;
+    }
+    Some(path.to_string_lossy().replace('\\', "/"))
+}
+
+fn ignored_log_directory(path: &Path) -> bool {
+    path.file_name().is_some_and(|name| {
+        let name = name.to_string_lossy();
+        name.eq_ignore_ascii_case(PATCH_ORIGINALS_DIR)
+            || name.eq_ignore_ascii_case("ExampleStory")
+    })
+}
+
+fn collect_log_files(root: &Path, directory: &Path, files: &mut Vec<String>) -> LauncherResult<()> {
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return Ok(()),
+        Err(error) => return Err(error_string(error)),
+    };
+    for entry in entries {
+        let entry = entry.map_err(error_string)?;
+        let file_type = entry.file_type().map_err(error_string)?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        let path = entry.path();
+        if file_type.is_dir() {
+            if !ignored_log_directory(&path) {
+                collect_log_files(root, &path, files)?;
+            }
+        } else if file_type.is_file() && is_log_file(&path) {
+            if let Ok(relative) = path.strip_prefix(root) {
+                if let Some(relative) = normalized_relative_log_path(relative) {
+                    files.push(relative);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn discover_log_files(config: &LauncherConfig) -> LauncherResult<Vec<String>> {
+    let root = PathBuf::from(
+        config
+            .install_path
+            .clone()
+            .unwrap_or(default_install_path()?.to_string_lossy().into_owned()),
+    );
+    if !root.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut files = Vec::new();
+    collect_log_files(&root, &root, &mut files)?;
+    files.sort_by(|left, right| {
+        let left_client = Path::new(left)
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case(CLIENT_LOG));
+        let right_client = Path::new(right)
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case(CLIENT_LOG));
+        right_client
+            .cmp(&left_client)
+            .then_with(|| left.to_lowercase().cmp(&right.to_lowercase()))
+    });
+    Ok(files)
+}
+
+fn selected_log_file(config: &LauncherConfig, files: &[String]) -> Option<String> {
+    config
+        .selected_log_file
+        .as_ref()
+        .and_then(|selected| {
+            files
+                .iter()
+                .find(|path| path.eq_ignore_ascii_case(selected))
+        })
+        .cloned()
+        .or_else(|| files.first().cloned())
+}
+
+fn resolve_log_path(config: &LauncherConfig) -> LauncherResult<Option<PathBuf>> {
+    let root = PathBuf::from(
+        config
+            .install_path
+            .clone()
+            .unwrap_or(default_install_path()?.to_string_lossy().into_owned()),
+    );
+    if let Some(relative) = config
+        .selected_log_file
+        .as_deref()
+        .and_then(|path| normalized_relative_log_path(Path::new(path)))
+    {
+        let candidate = root.join(Path::new(&relative));
+        if fs::symlink_metadata(&candidate).is_ok_and(|metadata| metadata.file_type().is_file()) {
+            return Ok(Some(candidate));
+        }
+    }
+    let files = discover_log_files(config)?;
+    Ok(selected_log_file(config, &files).map(|relative| root.join(Path::new(&relative))))
+}
+
+fn list_log_files_sync() -> LauncherResult<Vec<LogFileOption>> {
+    let mut config = load_config()?;
+    if !config.developer_mode {
+        return Err("Developer mode must be enabled to list logs.".to_string());
+    }
+    let files = discover_log_files(&config)?;
+    let selected = selected_log_file(&config, &files);
+    if config.selected_log_file != selected {
+        config.selected_log_file = selected.clone();
+        write_json(&config_path()?, &config)?;
+    }
+    Ok(files
+        .into_iter()
+        .map(|path| LogFileOption {
+            name: path.clone(),
+            selected: selected.as_ref() == Some(&path),
+            path,
+        })
+        .collect())
+}
+
+#[tauri::command]
+async fn list_log_files() -> LauncherResult<Vec<LogFileOption>> {
+    tauri::async_runtime::spawn_blocking(list_log_files_sync)
+        .await
+        .map_err(error_string)?
+}
+
+#[tauri::command]
+fn set_selected_log_file(path: String) -> LauncherResult<()> {
+    let config = load_config()?;
+    if !config.developer_mode {
+        return Err("Developer mode must be enabled to select a log.".to_string());
+    }
+    let normalized = normalized_relative_log_path(Path::new(&path))
+        .ok_or_else(|| "Invalid log file path.".to_string())?;
+    let files = discover_log_files(&config)?;
+    let selected = files
+        .into_iter()
+        .find(|candidate| candidate.eq_ignore_ascii_case(&normalized))
+        .ok_or_else(|| "The selected log file no longer exists.".to_string())?;
+    save_selected_log_file(Some(selected))
+}
+
 fn read_client_log_sync(offset: u64) -> LauncherResult<ClientLogChunk> {
     let config = load_config()?;
     if !config.developer_mode {
         return Err("Developer mode must be enabled to read the client log.".to_string());
     }
-    let log_path = PathBuf::from(
-        config
-            .install_path
-            .unwrap_or(default_install_path()?.to_string_lossy().into_owned()),
-    )
-    .join(CLIENT_LOG);
-    if !log_path.is_file() {
+    let Some(log_path) = resolve_log_path(&config)? else {
         return Ok(ClientLogChunk {
             content: String::new(),
             next_offset: 0,
             reset: offset > 0,
+            has_more: false,
         });
-    }
+    };
 
     let mut file = File::open(log_path).map_err(error_string)?;
     let length = file.metadata().map_err(error_string)?.len();
@@ -2633,11 +2821,14 @@ fn read_client_log_sync(offset: u64) -> LauncherResult<ClientLogChunk> {
     let start = if reset { 0 } else { offset };
     file.seek(SeekFrom::Start(start)).map_err(error_string)?;
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).map_err(error_string)?;
+    file.take(LOG_READ_CHUNK_SIZE)
+        .read_to_end(&mut bytes)
+        .map_err(error_string)?;
     Ok(ClientLogChunk {
         next_offset: start + bytes.len() as u64,
         content: String::from_utf8_lossy(&bytes).into_owned(),
         reset,
+        has_more: start + (bytes.len() as u64) < length,
     })
 }
 
@@ -2653,15 +2844,9 @@ fn clear_client_log_sync() -> LauncherResult<()> {
     if !config.developer_mode {
         return Err("Developer mode must be enabled to clear the client log.".to_string());
     }
-    let log_path = PathBuf::from(
-        config
-            .install_path
-            .unwrap_or(default_install_path()?.to_string_lossy().into_owned()),
-    )
-    .join(CLIENT_LOG);
-    if !log_path.is_file() {
+    let Some(log_path) = resolve_log_path(&config)? else {
         return Ok(());
-    }
+    };
     OpenOptions::new()
         .write(true)
         .truncate(true)
@@ -3678,6 +3863,8 @@ fn main() {
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             get_state,
+            list_log_files,
+            set_selected_log_file,
             read_client_log,
             clear_client_log,
             choose_folder,
@@ -3866,6 +4053,37 @@ mod tests {
         assert_eq!(designer_launch_argument("building").unwrap(), "-building");
         assert_eq!(designer_launch_argument("designer").unwrap(), "-designer");
         assert!(designer_launch_argument("unknown").is_err());
+    }
+
+    #[test]
+    fn developer_game_launch_adds_log_argument() {
+        assert_eq!(main_game_launch_arguments(false), vec!["-launcher"]);
+        assert_eq!(
+            main_game_launch_arguments(true),
+            vec!["-launcher", "-log"]
+        );
+    }
+
+    #[test]
+    fn log_file_selections_only_accept_relative_log_and_text_paths() {
+        assert_eq!(
+            normalized_relative_log_path(Path::new(r"Logs\ClientInterface.log")).as_deref(),
+            Some("Logs/ClientInterface.log")
+        );
+        assert_eq!(
+            normalized_relative_log_path(Path::new("diagnostics.txt")).as_deref(),
+            Some("diagnostics.txt")
+        );
+        assert!(normalized_relative_log_path(Path::new("../outside.log")).is_none());
+        assert!(normalized_relative_log_path(Path::new("notes.json")).is_none());
+    }
+
+    #[test]
+    fn log_discovery_ignores_patch_originals_and_example_story_directories() {
+        assert!(ignored_log_directory(Path::new(PATCH_ORIGINALS_DIR)));
+        assert!(ignored_log_directory(Path::new("ExampleStory")));
+        assert!(ignored_log_directory(Path::new("examplestory")));
+        assert!(!ignored_log_directory(Path::new("Story")));
     }
 
     #[test]
