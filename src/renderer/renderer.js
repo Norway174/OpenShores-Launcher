@@ -124,17 +124,11 @@ function applyTheme(themeId, css) {
 }
 
 function applyLogFontSize(size) {
-  let setting = $('#log-font-size-setting');
   if (size == null) {
-    setting?.remove();
+    document.documentElement.style.removeProperty('--log-font-size');
     return;
   }
-  if (!setting) {
-    setting = document.createElement('style');
-    setting.id = 'log-font-size-setting';
-  }
-  setting.textContent = `:root { --log-font-size: ${size}px; }`;
-  document.head.insertBefore(setting, $('#active-theme-stylesheet'));
+  document.documentElement.style.setProperty('--log-font-size', `${size}px`);
 }
 
 function closeThemeMenus() {
