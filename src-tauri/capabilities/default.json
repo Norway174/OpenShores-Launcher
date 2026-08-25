@@ -2,6 +2,6 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default capability for the OpenShores launcher window",
-  "windows": ["main", "theme-editor"],
+  "windows": ["main", "theme-editor", "changelog"],
   "permissions": ["core:default", "os:default"]
 }

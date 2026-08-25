@@ -46,7 +46,7 @@ const GAME_MANIFEST_URL: &str = "https://openshores.net/downloads/manifest.json"
 const PATCH_RELEASE_API: &str =
     "https://api.github.com/repos/Celarious/OpenShores-IP-Patch/releases?per_page=100";
 const LAUNCHER_RELEASE_API: &str =
-    "https://api.github.com/repos/Norway174/OpenShores-Launcher/releases/latest";
+    "https://api.github.com/repos/Norway174/OpenShores-Launcher/releases?per_page=100";
 const GAME_EXE: &str = "Shores of Hazeron.exe";
 const GAME_DLL: &str = "AuLoginClient13.dll";
 const CLIENT_LOG: &str = "ClientInterface.log";
@@ -93,6 +93,7 @@ struct AppState {
     game_pid: Arc<Mutex<Option<u32>>>,
     designer_pid: Arc<Mutex<Option<u32>>>,
     pending_update: Arc<Mutex<Option<PendingUpdate>>>,
+    changelog: Arc<Mutex<Option<ChangelogPayload>>>,
     server_statuses: Arc<Mutex<HashMap<String, ServerStatus>>>,
     account_clients: Arc<Mutex<HashMap<String, Client>>>,
 }
@@ -315,9 +316,26 @@ struct GameStatusPayload {
 }
 
 #[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct UpdaterStatusPayload {
     state: String,
     message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    progress: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    changelog_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    changelog: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    release_url: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChangelogPayload {
+    title: String,
+    changelog: String,
+    release_url: String,
 }
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -346,6 +364,8 @@ struct LogFileOption {
 struct GithubRelease {
     tag_name: String,
     name: Option<String>,
+    body: Option<String>,
+    html_url: String,
     published_at: Option<String>,
     #[serde(default)]
     draft: bool,
@@ -854,13 +874,23 @@ fn emit_operation_status(app: &AppHandle, busy: bool, error: Option<String>) {
     let _ = app.emit("operation-status", OperationStatusPayload { busy, error });
 }
 
-fn emit_updater(app: &AppHandle, state: &str, message: impl Into<String>) {
+fn updater_status(state: &str, message: impl Into<String>) -> UpdaterStatusPayload {
+    UpdaterStatusPayload {
+        state: state.to_string(),
+        message: message.into(),
+        progress: None,
+        changelog_title: None,
+        changelog: None,
+        release_url: None,
+    }
+}
+
+fn emit_updater(app: &AppHandle, state: &str, message: impl Into<String>, progress: Option<u8>) {
+    let mut status = updater_status(state, message);
+    status.progress = progress;
     let _ = app.emit(
         "updater-status",
-        UpdaterStatusPayload {
-            state: state.to_string(),
-            message: message.into(),
-        },
+        status,
     );
 }
 
@@ -1566,7 +1596,7 @@ fn fetch_patch_releases(client: &Client) -> LauncherResult<Vec<GithubRelease>> {
         "IP patch release check",
     )?;
     let mut releases: Vec<GithubRelease> = response.json().map_err(error_string)?;
-    releases.retain(|release| !release.draft);
+    releases.retain(|release| !release.draft && !release.prerelease);
     releases.sort_by(|left, right| right.published_at.cmp(&left.published_at));
     if releases.is_empty() {
         return Err("No IP patch releases are available.".to_string());
@@ -2247,6 +2277,25 @@ fn parse_release_version(release: &GithubRelease) -> LauncherResult<Version> {
         .map_err(|_| "The latest launcher release has no valid semantic version tag.".to_string())
 }
 
+fn release_changelog<'a>(releases: impl IntoIterator<Item = &'a GithubRelease>) -> String {
+    releases
+        .into_iter()
+        .filter_map(|release| {
+            let body = release.body.as_deref()?.trim();
+            if body.is_empty() {
+                return None;
+            }
+            let title = release
+                .name
+                .as_deref()
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or(&release.tag_name);
+            Some(format!("## {title}\n\n{body}"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n---\n\n")
+}
+
 fn download_launcher_update(
     app: &AppHandle,
     client: &Client,
@@ -2256,11 +2305,7 @@ fn download_launcher_update(
     let temp = launcher_temp_path()?;
     fs::create_dir_all(&temp).map_err(error_string)?;
     let destination = temp.join(format!("OpenShores-Launcher-{version}.download.exe"));
-    emit_updater(
-        app,
-        "downloading",
-        format!("Downloading launcher {version} - 0%"),
-    );
+    emit_updater(app, "downloading", format!("Downloading launcher {version}"), Some(0));
     let result = (|| {
         let mut response = checked_response(
             client
@@ -2285,11 +2330,7 @@ fn download_launcher_update(
             } else {
                 0
             };
-            emit_updater(
-                app,
-                "downloading",
-                format!("Downloading launcher {version} - {percent}%"),
-            );
+            emit_updater(app, "downloading", format!("Downloading launcher {version}"), Some(percent as u8));
         }
         output.flush().map_err(error_string)?;
         verify_launcher_digest(&destination, asset)?;
@@ -2313,22 +2354,21 @@ fn check_updates_sync(
         .send()
         .map_err(error_string)?;
     if response.status().as_u16() == 404 {
-        return Ok(UpdaterStatusPayload {
-            state: "current".to_string(),
-            message: "The launcher update channel has not been published yet.".to_string(),
-        });
+        return Ok(updater_status("current", "The launcher update channel has not been published yet."));
     }
     let response = checked_response(response, "Launcher update check")?;
-    let release: GithubRelease = response.json().map_err(error_string)?;
+    let mut releases: Vec<GithubRelease> = response.json().map_err(error_string)?;
+    releases.retain(|release| !release.draft);
+    releases.sort_by(|left, right| right.published_at.cmp(&left.published_at));
+    let release = releases
+        .first()
+        .ok_or_else(|| "The launcher update channel has not been published yet.".to_string())?;
     let release_version = parse_release_version(&release)?;
     let current_version =
         Version::parse(env!("OPENSHORES_LAUNCHER_VERSION")).map_err(error_string)?;
     if release_version <= current_version {
         *state.pending_update.lock().map_err(error_string)? = None;
-        return Ok(UpdaterStatusPayload {
-            state: "current".to_string(),
-            message: "Launcher is up to date.".to_string(),
-        });
+        return Ok(updater_status("current", "Launcher is up to date."));
     }
     let binary_name = if cfg!(target_os = "linux") { "OpenShores-Launcher-amd64.AppImage" } else { "OpenShores-Launcher.exe" };
     let asset = release
@@ -2342,10 +2382,14 @@ fn check_updates_sync(
         asset: asset.clone(),
         version: release_version.clone(),
     });
-    let status = UpdaterStatusPayload {
-        state: "available".to_string(),
-        message: format!("Launcher {release_version} is available."),
-    };
+    let included_releases = releases.iter().filter(|candidate| {
+        parse_release_version(candidate)
+            .is_ok_and(|version| version > current_version && version <= release_version)
+    });
+    let mut status = updater_status("available", format!("Launcher {release_version} is available."));
+    status.changelog_title = Some(format!("Launcher {release_version}"));
+    status.changelog = Some(release_changelog(included_releases));
+    status.release_url = Some(release.html_url.clone());
     if !manual {
         let _ = app.emit("updater-status", status.clone());
     }
@@ -2356,10 +2400,7 @@ fn check_ip_patch_update_sync() -> LauncherResult<UpdaterStatusPayload> {
     let config = load_config()?;
     let install_path = PathBuf::from(config.install_path.clone().unwrap());
     if !is_managed_manifest(read_json::<Value>(&install_path.join(MANIFEST_FILE)).as_ref()) {
-        return Ok(UpdaterStatusPayload {
-            state: "current".to_string(),
-            message: "Install OpenShores before checking the IP patch.".to_string(),
-        });
+        return Ok(updater_status("current", "Install OpenShores before checking the IP patch."));
     }
 
     if config
@@ -2367,15 +2408,9 @@ fn check_ip_patch_update_sync() -> LauncherResult<UpdaterStatusPayload> {
         .eq_ignore_ascii_case(DISABLED_PATCH_RELEASE)
     {
         return Ok(if config.applied_ip_patch_release.is_some() {
-            UpdaterStatusPayload {
-                state: "available".to_string(),
-                message: "The installed IP patch can be removed.".to_string(),
-            }
+            updater_status("available", "The installed IP patch can be removed.")
         } else {
-            UpdaterStatusPayload {
-                state: "current".to_string(),
-                message: "The IP patch is disabled.".to_string(),
-            }
+            updater_status("current", "The IP patch is disabled.")
         });
     }
 
@@ -2383,16 +2418,22 @@ fn check_ip_patch_update_sync() -> LauncherResult<UpdaterStatusPayload> {
     let releases = fetch_patch_releases(&client)?;
     let release = resolve_patch_release(&releases, &config.ip_patch_release)?;
     if config.applied_ip_patch_release.as_deref() == Some(&release.tag_name) {
-        return Ok(UpdaterStatusPayload {
-            state: "current".to_string(),
-            message: format!("IP patch {} is up to date.", release.tag_name),
-        });
+        return Ok(updater_status("current", format!("IP patch {} is up to date.", release.tag_name)));
     }
 
-    Ok(UpdaterStatusPayload {
-        state: "available".to_string(),
-        message: format!("IP patch {} is available.", release.tag_name),
-    })
+    let prior_tag = config.applied_ip_patch_release.as_deref();
+    let target_index = releases
+        .iter()
+        .position(|candidate| candidate.tag_name == release.tag_name)
+        .unwrap_or(0);
+    let included_releases = releases[target_index..]
+        .iter()
+        .take_while(|candidate| Some(candidate.tag_name.as_str()) != prior_tag);
+    let mut status = updater_status("available", format!("IP patch {} is available.", release.tag_name));
+    status.changelog_title = Some(format!("IP patch {}", release.tag_name));
+    status.changelog = Some(release_changelog(included_releases));
+    status.release_url = Some(release.html_url.clone());
+    Ok(status)
 }
 
 fn game_manifest_update_available(local: Option<&Value>, remote: &GameManifest) -> bool {
@@ -2410,23 +2451,14 @@ fn check_game_update_sync() -> LauncherResult<UpdaterStatusPayload> {
     let install_path = PathBuf::from(config.install_path.clone().unwrap());
     let local = read_json::<Value>(&install_path.join(MANIFEST_FILE));
     if !is_managed_manifest(local.as_ref()) || !install_path.join(GAME_EXE).is_file() {
-        return Ok(UpdaterStatusPayload {
-            state: "current".to_string(),
-            message: "Install OpenShores before checking game files.".to_string(),
-        });
+        return Ok(updater_status("current", "Install OpenShores before checking game files."));
     }
 
     let remote = fetch_game_manifest(&http_client()?)?;
     if game_manifest_update_available(local.as_ref(), &remote) {
-        Ok(UpdaterStatusPayload {
-            state: "available".to_string(),
-            message: format!("OpenShores client {} is available.", remote.version),
-        })
+        Ok(updater_status("available", format!("OpenShores client {} is available.", remote.version)))
     } else {
-        Ok(UpdaterStatusPayload {
-            state: "current".to_string(),
-            message: "OpenShores game files are up to date.".to_string(),
-        })
+        Ok(updater_status("current", "OpenShores game files are up to date."))
     }
 }
 
@@ -2437,7 +2469,7 @@ fn report_previous_update_error(app: &AppHandle) {
     if let Ok(message) = fs::read_to_string(&path) {
         let _ = fs::remove_file(path);
         if !message.trim().is_empty() {
-            emit_updater(app, "error", message.trim());
+            emit_updater(app, "error", message.trim(), None);
         }
     }
 }
@@ -3737,6 +3769,64 @@ fn open_link(url: String) -> LauncherResult<()> {
 }
 
 #[tauri::command]
+fn get_changelog(state: State<'_, AppState>) -> LauncherResult<ChangelogPayload> {
+    state
+        .changelog
+        .lock()
+        .map_err(error_string)?
+        .clone()
+        .ok_or_else(|| "No changelog is available.".to_string())
+}
+
+#[tauri::command]
+async fn open_changelog(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    title: String,
+    changelog: String,
+    release_url: String,
+) -> LauncherResult<()> {
+    if title.trim().is_empty() || changelog.trim().is_empty() {
+        return Err("No changelog is available for this update.".to_string());
+    }
+    if !release_url.starts_with("https://github.com/") {
+        return Err("The release URL is not a GitHub URL.".to_string());
+    }
+    *state.changelog.lock().map_err(error_string)? = Some(ChangelogPayload {
+        title,
+        changelog,
+        release_url,
+    });
+    if let Some(window) = app.get_webview_window("changelog") {
+        let _ = window.show();
+        let _ = window.set_focus();
+        window.eval("window.location.reload()").map_err(error_string)?;
+        return Ok(());
+    }
+    let webview_data = launcher_data_path()?.join("webview");
+    WebviewWindowBuilder::new(&app, "changelog", WebviewUrl::App("changelog.html".into()))
+        .title("OpenShores Changelog")
+        .inner_size(720.0, 640.0)
+        .min_inner_size(520.0, 420.0)
+        .center()
+        .decorations(true)
+        .resizable(true)
+        .closable(true)
+        .data_directory(webview_data)
+        .build()
+        .map_err(error_string)?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn close_changelog(app: AppHandle) -> LauncherResult<()> {
+    if let Some(window) = app.get_webview_window("changelog") {
+        window.close().map_err(error_string)?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
 async fn check_updates(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -3770,11 +3860,7 @@ fn install_launcher_update_sync(app: &AppHandle, state: &AppState) -> LauncherRe
         .ok_or_else(|| "No launcher update is available.".to_string())?;
     let client = http_client()?;
     let destination = download_launcher_update(app, &client, &pending.asset, &pending.version)?;
-    emit_updater(
-        app,
-        "installing",
-        format!("Installing launcher {}...", pending.version),
-    );
+    emit_updater(app, "installing", format!("Installing launcher {}...", pending.version), Some(100));
 
     #[cfg(windows)]
     {
@@ -3869,7 +3955,7 @@ async fn install_launcher_update(
     .await
     .map_err(error_string)?;
     if let Err(error) = &result {
-        emit_updater(&app, "error", format!("Launcher update failed: {error}"));
+        emit_updater(&app, "error", format!("Launcher update failed: {error}"), None);
     }
     result
 }
@@ -3938,6 +4024,9 @@ fn main() {
             exit_launcher,
             open_folder,
             open_link,
+            get_changelog,
+            open_changelog,
+            close_changelog,
             check_updates,
             check_ip_patch_update,
             check_game_update,
@@ -4045,6 +4134,8 @@ mod tests {
         let release = GithubRelease {
             tag_name: "v1.2.3".to_string(),
             name: None,
+            body: None,
+            html_url: "https://github.com/example/releases/v1.2.3".to_string(),
             published_at: None,
             draft: false,
             prerelease: false,
@@ -4054,6 +4145,36 @@ mod tests {
             parse_release_version(&release).unwrap(),
             Version::new(1, 2, 3)
         );
+    }
+
+    #[test]
+    fn release_changelog_combines_release_bodies() {
+        let releases = [
+            GithubRelease {
+                tag_name: "v1.2.0".to_string(),
+                name: Some("Version 1.2.0".to_string()),
+                body: Some("* New update banners".to_string()),
+                html_url: "https://github.com/example/releases/v1.2.0".to_string(),
+                published_at: None,
+                draft: false,
+                prerelease: false,
+                assets: Vec::new(),
+            },
+            GithubRelease {
+                tag_name: "v1.1.0".to_string(),
+                name: None,
+                body: Some("* Previous fixes".to_string()),
+                html_url: "https://github.com/example/releases/v1.1.0".to_string(),
+                published_at: None,
+                draft: false,
+                prerelease: false,
+                assets: Vec::new(),
+            },
+        ];
+        let changelog = release_changelog(&releases);
+        assert!(changelog.contains("## Version 1.2.0\n\n* New update banners"));
+        assert!(changelog.contains("## v1.1.0\n\n* Previous fixes"));
+        assert!(changelog.contains("\n\n---\n\n"));
     }
 
     #[test]
@@ -4144,6 +4265,8 @@ mod tests {
             GithubRelease {
                 tag_name: "r4".to_string(),
                 name: Some("Fourth release".to_string()),
+                body: None,
+                html_url: "https://github.com/example/releases/r4".to_string(),
                 published_at: Some("2026-08-07T02:32:45Z".to_string()),
                 draft: false,
                 prerelease: false,
@@ -4152,6 +4275,8 @@ mod tests {
             GithubRelease {
                 tag_name: "r3".to_string(),
                 name: Some("Third release".to_string()),
+                body: None,
+                html_url: "https://github.com/example/releases/r3".to_string(),
                 published_at: Some("2026-08-07T01:17:58Z".to_string()),
                 draft: false,
                 prerelease: false,

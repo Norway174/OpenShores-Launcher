@@ -98,6 +98,9 @@ jobs:
     if: needs.detect-version-change.outputs.changed == 'true'
     runs-on: ubuntu-22.04
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Download Windows artifact
         uses: actions/download-artifact@v8
         with:
@@ -108,15 +111,24 @@ jobs:
         with:
           name: artifact-linux
           path: OpenShores-Launcher-amd64.AppImage
-      - name: Print working directory
-        run: pwd; env
+      - name: Generate release notes from commits
+        shell: bash
+        run: |
+          previous_tag=$(git tag --sort=-version:refname | head -n 1)
+          if [ -n "$previous_tag" ]; then
+            range="$previous_tag..${{ github.sha }}"
+          else
+            range="${{ github.sha }}"
+          fi
+          printf '## Commits\n\n' > release-notes.md
+          git log "$range" --reverse --pretty='* %s (`%h`)' >> release-notes.md
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ needs.detect-version-change.outputs.version }}
           name: OpenShores Launcher ${{ needs.detect-version-change.outputs.version }}
           target_commitish: ${{ github.sha }}
-          generate_release_notes: true
+          body_path: release-notes.md
           fail_on_unmatched_files: true
           files: |
             */**/OpenShores-Launcher.exe

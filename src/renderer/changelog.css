@@ -1,0 +1,43 @@
+:root {
+  color-scheme: dark;
+  --window: #242424;
+  --panel: #2c2c2c;
+  --line: #414141;
+  --text: #ededed;
+  --muted: #a1a1a1;
+  --blue: #277da7;
+  --blue-hover: #3293c2;
+}
+
+* { box-sizing: border-box; }
+html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: var(--window); }
+body { color: var(--text); font-family: Inter, "Segoe UI", Arial, sans-serif; font-size: 13px; }
+button { color: inherit; font: inherit; }
+.changelog-shell { height: 100%; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; }
+header { min-height: 82px; display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 17px 22px; border-bottom: 1px solid var(--line); background: rgba(0, 0, 0, .12); }
+.kicker { display: block; color: #70b7d8; font-size: 9px; letter-spacing: 1.4px; }
+h1 { overflow-wrap: anywhere; margin: 5px 0 0; font-family: "Arial Narrow", "Segoe UI", sans-serif; font-size: 22px; font-weight: 600; letter-spacing: 0; }
+article { overflow: auto; padding: 24px max(24px, calc((100% - 650px) / 2)); line-height: 1.55; user-select: text; }
+article h1, article h2, article h3 { margin: 26px 0 10px; color: #f5f5f5; font-family: "Arial Narrow", "Segoe UI", sans-serif; font-weight: 600; letter-spacing: 0; }
+article h1:first-child, article h2:first-child, article h3:first-child { margin-top: 0; }
+article h1 { font-size: 21px; }
+article h2 { font-size: 18px; }
+article h3 { font-size: 15px; }
+article p { margin: 10px 0; color: #d0d0d0; }
+article ul { margin: 9px 0 15px; padding-left: 21px; }
+article li { margin: 5px 0; color: #d4d4d4; }
+article code { padding: 2px 4px; border: 1px solid #454545; border-radius: 2px; color: #c9eafb; background: #1d1d1d; font-family: Consolas, monospace; font-size: 11px; }
+article a { color: #76c3e7; }
+article hr { height: 1px; margin: 27px 0; border: 0; background: var(--line); }
+footer { min-height: 56px; display: flex; align-items: center; justify-content: space-between; padding: 10px 22px; border-top: 1px solid var(--line); color: var(--muted); background: rgba(0, 0, 0, .1); font-size: 9px; letter-spacing: 1px; }
+.primary, .secondary { min-height: 34px; padding: 0 15px; border-radius: 2px; cursor: pointer; }
+.primary { border: 1px solid #3b91bb; background: var(--blue); font-weight: 600; }
+.primary:hover { background: var(--blue-hover); }
+.secondary { border: 1px solid #555; background: #383838; }
+.secondary:hover { border-color: #777; background: #444; }
+
+@media (max-width: 560px) {
+  header { align-items: flex-start; flex-direction: column; gap: 12px; }
+  header .primary { width: 100%; }
+  article { padding: 20px; }
+}

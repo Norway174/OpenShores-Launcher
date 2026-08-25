@@ -41,6 +41,7 @@ window.launcher = {
   exitLauncher: () => invoke('exit_launcher'),
   openFolder: () => invoke('open_folder'),
   openLink: url => invoke('open_link', { url }),
+  openChangelog: (title, changelog, releaseUrl) => invoke('open_changelog', { title, changelog, releaseUrl }),
   checkUpdates: () => invoke('check_updates'),
   checkPatchUpdate: () => invoke('check_ip_patch_update'),
   checkGameUpdate: () => invoke('check_game_update'),
@@ -672,7 +673,7 @@ function removeUpdateBanner(kind) {
   document.querySelector(`.update-banner[data-kind="${kind}"]`)?.remove();
 }
 
-function showUpdateBanner(kind, message, error = false) {
+function showUpdateBanner(kind, message, error = false, metadata = {}) {
   removeUpdateBanner(kind);
   const banner = document.createElement('section');
   banner.className = `update-banner ${kind}${error ? ' error' : ''}`;
@@ -689,6 +690,17 @@ function showUpdateBanner(kind, message, error = false) {
   copy.append(title, detail);
   banner.append(icon, copy);
   if (!error) {
+    if (metadata.changelog && metadata.releaseUrl) {
+      const changelog = document.createElement('button');
+      changelog.className = 'secondary banner-changelog';
+      changelog.textContent = 'Changelog';
+      changelog.addEventListener('click', () => window.launcher.openChangelog(
+        metadata.changelogTitle || title.textContent,
+        metadata.changelog,
+        metadata.releaseUrl
+      ));
+      banner.append(changelog);
+    }
     const action = document.createElement('button');
     action.className = 'primary';
     action.textContent = kind === 'launcher' ? 'Download & restart' : kind === 'patch' ? 'Update patch' : 'Update game';
@@ -869,6 +881,17 @@ window.launcher.onProgress(data => {
     $(updateTaskUi[activeUpdateKind].button).style.setProperty('--task-progress', `${data.percent}%`);
     updateTasks[activeUpdateKind].message = `${data.phase}, ${data.percent}%`;
     renderUpdateTask(activeUpdateKind);
+    const banner = document.querySelector(`.update-banner[data-kind="${activeUpdateKind}"]`);
+    if (banner) {
+      banner.classList.add('downloading');
+      banner.style.setProperty('--banner-progress', `${data.percent}%`);
+      banner.querySelector('.update-banner-copy span').textContent = `${data.phase}, ${data.percent}%`;
+      const action = banner.querySelector('.primary');
+      if (action) {
+        action.disabled = true;
+        action.textContent = 'Downloading...';
+      }
+    }
   }
 });
 
@@ -905,18 +928,21 @@ window.launcher.onThemeCssPreviewClear(() => {
 
 function handleUpdaterStatus(data) {
   if (data.state === 'available') {
+    updateTasks.launcher = { ...updateTasks.launcher, ...data };
     setUpdateTask('launcher', 'available', data.message);
-    showUpdateBanner('launcher', data.message);
+    showUpdateBanner('launcher', data.message, false, data);
   } else if (data.state === 'downloading' || data.state === 'installing') {
     setUpdateTask('launcher', 'updating', data.message);
-    const percent = data.message.match(/(\d+)%/)?.[1];
-    if (percent) $('#check-updates').style.setProperty('--task-progress', `${percent}%`);
+    const percent = data.progress;
+    if (percent !== undefined) $('#check-updates').style.setProperty('--task-progress', `${percent}%`);
     let banner = document.querySelector('.update-banner[data-kind="launcher"]');
     if (!banner) {
-      showUpdateBanner('launcher', data.message);
+      showUpdateBanner('launcher', data.message, false, updateTasks.launcher);
       banner = document.querySelector('.update-banner[data-kind="launcher"]');
     }
-    banner.querySelector('.update-banner-copy span').textContent = data.message;
+    banner.classList.add('downloading');
+    banner.style.setProperty('--banner-progress', `${percent ?? 0}%`);
+    banner.querySelector('.update-banner-copy span').textContent = `${data.message}${percent === undefined ? '' : `, ${percent}%`}`;
     const action = banner.querySelector('.primary');
     if (action) {
       action.disabled = true;
@@ -947,8 +973,9 @@ async function runMaintenanceItem(item) {
       if (item.kind === 'launcher') {
         handleUpdaterStatus(result);
       } else {
+        updateTasks[item.kind] = { ...updateTasks[item.kind], ...result };
         setUpdateTask(item.kind, result.state, result.message);
-        if (result.state === 'available') showUpdateBanner(item.kind, result.message);
+        if (result.state === 'available') showUpdateBanner(item.kind, result.message, false, result);
         else removeUpdateBanner(item.kind);
       }
       return;
