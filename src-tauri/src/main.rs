@@ -6,7 +6,6 @@ use reqwest::{
     Url,
 };
 use rfd::{MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
-use semver::Version;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha1::Sha1;
@@ -101,7 +100,7 @@ struct AppState {
 #[derive(Clone)]
 struct PendingUpdate {
     asset: GithubAsset,
-    version: Version,
+    version: String,
 }
 
 struct OperationGuard(Arc<AtomicBool>);
@@ -2267,14 +2266,17 @@ fn launch_game_sync(
     get_snapshot(state)
 }
 
-fn parse_release_version(release: &GithubRelease) -> LauncherResult<Version> {
+fn release_version_label(release: &GithubRelease) -> LauncherResult<String> {
     let value = if release.tag_name.trim().is_empty() {
         release.name.as_deref().unwrap_or_default()
     } else {
         &release.tag_name
     };
-    Version::parse(value.trim().trim_start_matches(['v', 'V']))
-        .map_err(|_| "The latest launcher release has no valid semantic version tag.".to_string())
+    let version = value.trim().trim_start_matches(['v', 'V']);
+    if version.is_empty() {
+        return Err("The latest launcher release has no version tag.".to_string());
+    }
+    Ok(version.to_string())
 }
 
 fn release_changelog<'a>(releases: impl IntoIterator<Item = &'a GithubRelease>) -> String {
@@ -2300,7 +2302,7 @@ fn download_launcher_update(
     app: &AppHandle,
     client: &Client,
     asset: &GithubAsset,
-    version: &Version,
+    version: &str,
 ) -> LauncherResult<PathBuf> {
     let temp = launcher_temp_path()?;
     fs::create_dir_all(&temp).map_err(error_string)?;
@@ -2363,10 +2365,9 @@ fn check_updates_sync(
     let release = releases
         .first()
         .ok_or_else(|| "The launcher update channel has not been published yet.".to_string())?;
-    let release_version = parse_release_version(&release)?;
-    let current_version =
-        Version::parse(env!("OPENSHORES_LAUNCHER_VERSION")).map_err(error_string)?;
-    if release_version <= current_version {
+    let release_version = release_version_label(release)?;
+    let current_version = env!("OPENSHORES_LAUNCHER_VERSION");
+    if release_version.eq_ignore_ascii_case(current_version) {
         *state.pending_update.lock().map_err(error_string)? = None;
         return Ok(updater_status("current", "Launcher is up to date."));
     }
@@ -2382,9 +2383,9 @@ fn check_updates_sync(
         asset: asset.clone(),
         version: release_version.clone(),
     });
-    let included_releases = releases.iter().filter(|candidate| {
-        parse_release_version(candidate)
-            .is_ok_and(|version| version > current_version && version <= release_version)
+    let included_releases = releases.iter().take_while(|candidate| {
+        release_version_label(candidate)
+            .is_ok_and(|version| !version.eq_ignore_ascii_case(current_version))
     });
     let mut status = updater_status("available", format!("Launcher {release_version} is available."));
     status.changelog_title = Some(format!("Launcher {release_version}"));
@@ -4130,20 +4131,27 @@ mod tests {
     }
 
     #[test]
-    fn release_versions_accept_a_v_prefix() {
+    fn release_versions_accept_arbitrary_labels() {
         let release = GithubRelease {
-            tag_name: "v1.2.3".to_string(),
+            tag_name: "v1.2.3.4".to_string(),
             name: None,
             body: None,
-            html_url: "https://github.com/example/releases/v1.2.3".to_string(),
+            html_url: "https://github.com/example/releases/v1.2.3.4".to_string(),
             published_at: None,
             draft: false,
             prerelease: false,
             assets: Vec::new(),
         };
+        assert_eq!(release_version_label(&release).unwrap(), "1.2.3.4");
+
+        let named_release = GithubRelease {
+            tag_name: String::new(),
+            name: Some("nightly-2026-08-25".to_string()),
+            ..release
+        };
         assert_eq!(
-            parse_release_version(&release).unwrap(),
-            Version::new(1, 2, 3)
+            release_version_label(&named_release).unwrap(),
+            "nightly-2026-08-25"
         );
     }
 
