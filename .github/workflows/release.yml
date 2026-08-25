@@ -27,11 +27,7 @@ jobs:
         shell: pwsh
         run: |
           $current = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          if ($current -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$') {
-            throw "package.json has an invalid semantic version: $current"
-          }
-
-          $changed = -not [bool](git tag --list "v$current")
+          $changed = -not [bool](git tag --list | Where-Object { $_ -ceq "v$current" })
           "changed=$($changed.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
           "version=$current" >> $env:GITHUB_OUTPUT
 
