@@ -13,8 +13,6 @@ window.launcher = {
   clearClientLog: () => invoke('clear_client_log'),
   chooseFolder: () => invoke('choose_folder'),
   install: () => invoke('install_game'),
-  getPatchReleases: () => invoke('get_ip_patch_releases'),
-  setPatchRelease: selection => invoke('set_ip_patch_release', { selection }),
   setDeveloperMode: enabled => invoke('set_developer_mode', { enabled }),
   setPostLaunchAction: (process, action) => invoke('set_post_launch_action', { process, action }),
   setTheme: themeId => invoke('set_theme', { themeId }),
@@ -23,7 +21,6 @@ window.launcher = {
   deleteTheme: themeId => invoke('delete_theme', { themeId }),
   openThemeEditor: themeId => invoke('open_theme_editor', { themeId }),
   finishThemeElementPicker: selector => invoke('finish_theme_element_picker', { selector }),
-  updatePatch: () => invoke('update_ip_patch'),
   uninstall: () => invoke('uninstall_game'),
   addServer: (nickname, host) => invoke('add_server', { nickname, host }),
   editServer: (serverId, nickname, host) => invoke('edit_server', { serverId, nickname, host }),
@@ -41,9 +38,9 @@ window.launcher = {
   exitLauncher: () => invoke('exit_launcher'),
   openFolder: () => invoke('open_folder'),
   openLink: url => invoke('open_link', { url }),
+  getNews: () => invoke('get_news'),
   openChangelog: (title, changelog, releaseUrl) => invoke('open_changelog', { title, changelog, releaseUrl }),
   checkUpdates: () => invoke('check_updates'),
-  checkPatchUpdate: () => invoke('check_ip_patch_update'),
   checkGameUpdate: () => invoke('check_game_update'),
   installUpdate: () => invoke('install_launcher_update'),
   checkPath: (cmd) => invoke('check_path', { cmd }),
@@ -59,7 +56,6 @@ window.launcher = {
 let state = null;
 let busy = false;
 let serverStatusTimer = null;
-let patchUpdateTimer = null;
 let gameUpdateTimer = null;
 let logUpdateTimer = null;
 let logFilterTimer = null;
@@ -86,17 +82,15 @@ let pendingStopProcess = null;
 let stopModalPreviousFocus = null;
 const updateTasks = {
   launcher: { phase: 'idle', message: '' },
-  patch: { phase: 'idle', message: '' },
   game: { phase: 'idle', message: '' }
 };
 const maintenanceQueue = [];
 let maintenanceActive = false;
 let maintenanceGeneration = 0;
 let activeUpdateKind = null;
-let latestPatchLabel = 'Latest Release';
 let linuxState = {
   winePath: null,
-  xdeltaPath: null
+  patcherPath: null
 }
 
 function connectedServer() {
@@ -636,7 +630,6 @@ function setUpdateCheckResult(message, status = '') {
 
 const updateTaskUi = {
   launcher: { button: '#check-updates', idle: 'Check now' },
-  patch: { button: '#update-patch', idle: 'Update patch' },
   game: { button: '#refresh-game', idle: 'Update game' }
 };
 
@@ -656,7 +649,7 @@ function renderUpdateTask(kind) {
   button.disabled = unavailable || processBlocked || waiting || (busy && task.phase !== 'updating');
   const wrapper = button.closest('.update-button-wrap');
   if (task.phase === 'pending') wrapper.dataset.tooltip = 'Pending...';
-  else if (task.phase === 'checking') wrapper.dataset.tooltip = task.message || `Checking ${kind === 'launcher' ? 'the launcher' : kind === 'patch' ? 'the IP patch' : 'game files'} for updates.`;
+  else if (task.phase === 'checking') wrapper.dataset.tooltip = task.message || `Checking ${kind === 'launcher' ? 'the launcher' : 'the game'} for updates.`;
   else if (task.phase === 'updating') wrapper.dataset.tooltip = task.message || 'This update is currently in progress.';
   else if (task.phase === 'error') wrapper.dataset.tooltip = task.message || 'The update task failed. Click to try again.';
   else if (unavailable) wrapper.dataset.tooltip = 'Install OpenShores first.';
@@ -684,7 +677,7 @@ function showUpdateBanner(kind, message, error = false, metadata = {}) {
   const copy = document.createElement('div');
   copy.className = 'update-banner-copy';
   const title = document.createElement('strong');
-  title.textContent = error ? 'Update check failed' : kind === 'launcher' ? 'Launcher update available' : kind === 'patch' ? 'IP patch update available' : 'Game client update available';
+  title.textContent = error ? 'Update check failed' : kind === 'launcher' ? 'Launcher update available' : 'Game update available';
   const detail = document.createElement('span');
   detail.textContent = message;
   copy.append(title, detail);
@@ -703,7 +696,7 @@ function showUpdateBanner(kind, message, error = false, metadata = {}) {
     }
     const action = document.createElement('button');
     action.className = 'primary';
-    action.textContent = kind === 'launcher' ? 'Download & restart' : kind === 'patch' ? 'Update patch' : 'Update game';
+    action.textContent = kind === 'launcher' ? 'Download & restart' : 'Update game';
     action.addEventListener('click', () => kind === 'launcher' ? installLauncherUpdateNow() : enqueueMaintenance(kind, 'update'));
     banner.append(action);
   }
@@ -713,6 +706,34 @@ function showUpdateBanner(kind, message, error = false, metadata = {}) {
   dismiss.textContent = '\u00d7';
   dismiss.addEventListener('click', () => banner.remove());
   banner.append(dismiss);
+  $('#update-banners').append(banner);
+}
+
+function showLoginBanner(message) {
+  removeUpdateBanner('login');
+  const banner = document.createElement('section');
+  banner.className = 'update-banner login';
+  banner.dataset.kind = 'login';
+  const icon = document.createElement('span');
+  icon.className = 'update-banner-icon';
+  icon.textContent = '!';
+  const copy = document.createElement('div');
+  copy.className = 'update-banner-copy';
+  const title = document.createElement('strong');
+  title.textContent = 'Log in again';
+  const detail = document.createElement('span');
+  detail.textContent = message;
+  copy.append(title, detail);
+  const action = document.createElement('button');
+  action.className = 'primary';
+  action.textContent = 'Log in';
+  action.addEventListener('click', openAccountToLogIn);
+  const dismiss = document.createElement('button');
+  dismiss.className = 'banner-dismiss';
+  dismiss.setAttribute('aria-label', 'Dismiss login notification');
+  dismiss.textContent = '\u00d7';
+  dismiss.addEventListener('click', () => banner.remove());
+  banner.append(icon, copy, action, dismiss);
   $('#update-banners').append(banner);
 }
 
@@ -759,19 +780,13 @@ function render(nextState = state) {
   $('#startup-placeholder').classList.add('hidden');
   $('#actions').classList.remove('hidden');
   $('#install-path').textContent = state.installPath;
-  $('#patch-channel').textContent = state.ipPatchRelease === 'latest'
-    ? latestPatchLabel
-    : state.ipPatchRelease === 'none' ? 'Disable IP Patch' : state.ipPatchRelease;
-  $('#patch-release').value = state.ipPatchRelease || 'latest';
-  $('#patch-release').classList.toggle('disabled-selection', state.ipPatchRelease === 'none');
-  $('#patch-badge').classList.toggle('hidden', !state.installed);
+  $('#game-version').textContent = state.installedVersion || (state.installed ? 'Unknown' : 'Not installed');
+  $('#version-badge').textContent = state.installedVersion ? `VERSION ${state.installedVersion}` : '';
+  $('#version-badge').classList.toggle('hidden', !state.installed || !state.installedVersion);
   $('#game-source').textContent = connectedServer()?.host || 'No server selected';
   const anyProcessRunning = state.gameRunning || state.designerRunning;
   $('#open-folder').disabled = !state.installed || busy;
   $('#uninstall').disabled = !state.installed || busy;
-  $('#patch-release').disabled = busy;
-  $('#patch-release').classList.toggle('hidden', !state.developerMode);
-  $('#refresh-patch-releases').classList.toggle('hidden', !state.developerMode);
   $('#log-tab').classList.toggle('hidden', !state.developerMode);
   if (!state.developerMode && $('#log-tab').classList.contains('active')) switchView('home');
   $('#developer-mode').checked = !!state.developerMode;
@@ -799,23 +814,14 @@ function render(nextState = state) {
   } else if (state.installed) {
     $('#status-text').textContent = 'Ready to play';
     dot.classList.add('ready');
+  } else if (!state.loggedIn) {
+    $('#status-text').textContent = 'Log in to install';
   } else {
     $('#status-text').textContent = 'Not installed';
   }
-  renderProcessButton(
-    primary,
-    'game',
-    !!state.gameRunning,
-    state.installed ? 'Launch OpenShores' : 'Install OpenShores',
-    true
-  );
-  renderProcessButton(
-    $('#log-launch'),
-    'game',
-    !!state.gameRunning,
-    state.installed ? 'Launch OpenShores' : 'Install OpenShores',
-    true
-  );
+  const idleLabel = state.installed ? 'Launch OpenShores' : state.loggedIn ? 'Install OpenShores' : 'Log in to install';
+  renderProcessButton(primary, 'game', !!state.gameRunning, idleLabel, true);
+  renderProcessButton($('#log-launch'), 'game', !!state.gameRunning, idleLabel, true);
   renderProcessButton(designer, 'designer', !!state.designerRunning, 'Offline Designers...', state.installed);
   if (state.designerRunning || launchingProcesses.has('designer') || designer.disabled) closeDesignerMenu();
   renderUpdateTasks();
@@ -898,7 +904,7 @@ window.launcher.onProgress(data => {
 window.launcher.onOperationStatus(data => {
   busy = data.busy;
   if (data.error) {
-    $('#progress-phase').textContent = 'IP patch update failed';
+    $('#progress-phase').textContent = 'Update failed';
     $('#progress-percent').textContent = 'Failed';
     $('#progress-bar').style.width = '0';
     $('#progress-bar').classList.remove('complete');
@@ -965,15 +971,20 @@ async function runMaintenanceItem(item) {
   setUpdateTask(item.kind, item.action === 'check' ? 'checking' : 'updating', item.action === 'check' ? `Checking ${item.kind} updates...` : `Updating ${item.kind}...`);
   try {
     if (item.action === 'check') {
-      const check = item.kind === 'launcher' ? window.launcher.checkUpdates
-        : item.kind === 'patch' ? window.launcher.checkPatchUpdate
-          : window.launcher.checkGameUpdate;
+      const check = item.kind === 'launcher' ? window.launcher.checkUpdates : window.launcher.checkGameUpdate;
       const result = await check();
       if (generation !== maintenanceGeneration) return;
       if (item.kind === 'launcher') {
         handleUpdaterStatus(result);
       } else {
         updateTasks[item.kind] = { ...updateTasks[item.kind], ...result };
+        if (result.state === 'login') {
+          setUpdateTask(item.kind, 'current', result.message);
+          removeUpdateBanner(item.kind);
+          showLoginBanner(result.message);
+          return;
+        }
+        removeUpdateBanner('login');
         setUpdateTask(item.kind, result.state, result.message);
         if (result.state === 'available') showUpdateBanner(item.kind, result.message, false, result);
         else removeUpdateBanner(item.kind);
@@ -985,25 +996,12 @@ async function runMaintenanceItem(item) {
     $('#progress-area').classList.remove('hidden');
     busy = true;
     render();
-    const operation = item.kind === 'patch' ? window.launcher.updatePatch : window.launcher.install;
-    state = { ...state, ...(await operation()) };
+    state = { ...state, ...(await window.launcher.install()) };
     removeUpdateBanner(item.kind);
-    if (item.kind === 'game') {
-      removeUpdateBanner('patch');
-      setUpdateTask(
-        'patch',
-        'current',
-        state.ipPatchRelease === 'none'
-          ? 'The IP patch remains disabled after the game update.'
-          : 'The selected IP patch was reapplied with the game update.'
-      );
-    }
     setUpdateTask(
       item.kind,
       'current',
-      item.kind === 'patch'
-        ? state.ipPatchRelease === 'none' ? 'The IP patch is disabled.' : 'IP patch is up to date.'
-        : 'OpenShores game files are up to date.'
+      state.installedVersion ? `OpenShores ${state.installedVersion} is up to date.` : 'OpenShores is up to date.'
     );
   } catch (error) {
     const message = error?.message || String(error);
@@ -1046,7 +1044,7 @@ function enqueueMaintenance(kind, action = 'check') {
 async function installLauncherUpdateNow() {
   maintenanceGeneration += 1;
   maintenanceQueue.splice(0);
-  for (const kind of ['patch', 'game']) {
+  for (const kind of ['game']) {
     if (['pending', 'checking'].includes(updateTasks[kind].phase)) setUpdateTask(kind, 'idle');
   }
   setUpdateTask('launcher', 'updating', 'Starting launcher update...');
@@ -1213,6 +1211,11 @@ async function runAccountAction(operation) {
     $('#account-password').value = '';
     $('#account-password-confirm').value = '';
     setRegistering(false);
+    if (state.loggedIn) {
+      removeUpdateBanner('login');
+      if (state.installed) enqueueMaintenance('game', 'check');
+      else switchView('home');
+    }
   } catch (reason) {
     error.textContent = reason?.message || String(reason);
     error.classList.remove('hidden');
@@ -1281,9 +1284,15 @@ function closeStopModal() {
   if (stopModalPreviousFocus?.focus) stopModalPreviousFocus.focus();
 }
 
+function openAccountToLogIn() {
+  switchView('account');
+  $('#account-username').focus();
+}
+
 function handleGameAction() {
   if (state.gameRunning) openStopModal('game');
   else if (state.installed) launchProcess('game', window.launcher.launch);
+  else if (!state.loggedIn) openAccountToLogIn();
   else runOperation(window.launcher.install);
 }
 
@@ -1356,20 +1365,6 @@ $('#choose-folder').addEventListener('click', async () => {
 });
 $('#uninstall').addEventListener('click', () => runOperation(window.launcher.uninstall));
 $('#refresh-game').addEventListener('click', () => enqueueMaintenance('game', 'update'));
-$('#update-patch').addEventListener('click', () => enqueueMaintenance('patch', 'update'));
-$('#refresh-patch-releases').addEventListener('click', () => {
-  clearError();
-  loadPatchReleases();
-});
-$('#patch-release').addEventListener('change', event => {
-  const selection = event.currentTarget.value;
-  state = { ...state, ipPatchRelease: selection };
-  runOperation(async () => {
-    const next = await window.launcher.setPatchRelease(selection);
-    enqueueMaintenance('patch', 'check');
-    return next;
-  }, false);
-});
 $('#check-updates').addEventListener('click', () => enqueueMaintenance('launcher', 'check'));
 $('#log-filter').addEventListener('input', () => {
   window.clearTimeout(logFilterTimer);
@@ -1583,44 +1578,36 @@ creatorCredit.addEventListener('click', () => {
   if (creatorHeartsUnlocked) releaseCreatorHearts(3);
 });
 
-async function loadPatchReleases() {
-  const select = $('#patch-release');
-  const refresh = $('#refresh-patch-releases');
-  refresh.disabled = true;
-  refresh.classList.add('loading');
-  try {
-    const releases = await window.launcher.getPatchReleases();
-    const selected = state?.ipPatchRelease || 'latest';
-    const latest = releases.find(release => !release.prerelease);
-    latestPatchLabel = latest ? `Latest Release (${latest.name})` : 'Latest Release';
-    select.replaceChildren(new Option(latestPatchLabel, 'latest'));
-    for (const release of releases) {
-      const date = release.publishedAt
-        ? new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' }).format(new Date(release.publishedAt))
-        : 'Unknown date';
-      const option = new Option(`${release.name} (${release.tag}) — ${date}`, release.tag);
-      option.disabled = !release.hasZip;
-      if (!release.hasZip) option.textContent += ' — no ZIP asset';
-      select.add(option);
+async function loadNews() {
+  let items = [];
+  try { items = await window.launcher.getNews(); } catch (_) { }
+  const list = $('#news-list');
+  list.replaceChildren();
+  for (const item of items) {
+    const row = document.createElement('div');
+    row.className = 'news-item';
+    const date = document.createElement('time');
+    date.textContent = item.date || '';
+    const title = document.createElement('button');
+    title.type = 'button';
+    title.textContent = item.title;
+    title.addEventListener('click', () => window.launcher.openLink(item.url).catch(showError));
+    row.append(date, title);
+    if (item.summary) {
+      const summary = document.createElement('p');
+      summary.textContent = item.summary;
+      summary.title = item.summary;
+      row.append(summary);
     }
-    const disabledOption = new Option('Disable IP Patch', 'none');
-    disabledOption.className = 'patch-option-disabled';
-    select.add(disabledOption);
-    select.value = selected;
-    if (state) render();
-  } catch (error) {
-    showError(`Could not load IP patch releases: ${error?.message || String(error)}`);
-  } finally {
-    select.disabled = busy;
-    refresh.disabled = busy;
-    refresh.classList.remove('loading');
+    list.append(row);
   }
+  $('#news').classList.toggle('hidden', items.length === 0);
 }
 
 async function loadLinuxState() {
   linuxState = {
     winePath: null,
-    xdeltaPath: null
+    patcherPath: null
   }
 
   try {
@@ -1630,16 +1617,16 @@ async function loadLinuxState() {
   }
 
   try {
-    linuxState.xdeltaPath = (await window.launcher.checkPath("xdelta3")).path;
+    linuxState.patcherPath = (await window.launcher.checkPath("hpatchz")).path;
   } catch (error) {
-    showError(`xdelta3 - Missing from $PATH: ${error?.message || String(error)}`)
+    showError(`hpatchz (HDiffPatch) - Missing from $PATH: ${error?.message || String(error)}`)
   }
 
   try {
     const container = $('#linux-info');
     container.innerHTML = '';
 
-    for (const [title, value] of [['WINE PATH', linuxState.winePath], ['XDELTA3 PATH', linuxState.xdeltaPath]]) {
+    for (const [title, value] of [['WINE PATH', linuxState.winePath], ['HPATCHZ PATH', linuxState.patcherPath]]) {
       if (value == null) {
         continue;
       }
@@ -1667,11 +1654,10 @@ window.launcher.getState().then(async nextState => {
   }
   refreshServerStatuses();
   serverStatusTimer = window.setInterval(refreshServerStatuses, 10000);
-  await loadPatchReleases();
   enqueueMaintenance('launcher', 'check');
-  enqueueMaintenance('patch', 'check');
   enqueueMaintenance('game', 'check');
-  patchUpdateTimer = window.setInterval(() => enqueueMaintenance('patch', 'check'), 6 * 60 * 60 * 1000);
+  loadNews();
+  window.setInterval(loadNews, 60 * 60 * 1000);
   gameUpdateTimer = window.setInterval(() => enqueueMaintenance('game', 'check'), 12 * 60 * 60 * 1000);
 }).catch(error => {
   $('#startup-placeholder').querySelector('strong').textContent = 'Startup could not finish';

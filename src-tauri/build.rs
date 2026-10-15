@@ -16,5 +16,16 @@ fn main() {
         .expect("package.json does not contain a string version");
     println!("cargo:rustc-env=OPENSHORES_LAUNCHER_VERSION={version}");
 
+    println!("cargo:rustc-check-cfg=cfg(bundled_hpatchz)");
+    let linux_tool = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
+        .join("..")
+        .join("resources")
+        .join("hdiffpatch")
+        .join("hpatchz-linux-x86_64");
+    println!("cargo:rerun-if-changed={}", linux_tool.display());
+    if linux_tool.is_file() {
+        println!("cargo:rustc-cfg=bundled_hpatchz");
+    }
+
     tauri_build::build()
 }

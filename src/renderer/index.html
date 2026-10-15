@@ -18,7 +18,7 @@
       <div class="workspace">
         <nav id="section-nav" class="section-nav hidden" aria-label="Launcher sections">
           <button class="nav-item active" data-view="home">Overview</button>
-          <button class="nav-item" data-view="servers">Servers</button>
+          <button class="nav-item hidden" data-view="servers">Servers</button>
           <span id="account-tab-wrap" class="nav-tooltip" data-tooltip="Connect to a server first">
             <button id="account-tab" class="nav-item" data-view="account" disabled>Account</button>
           </span>
@@ -34,13 +34,18 @@
             <div class="status-panel">
               <div class="panel-heading">
                 <span>OPENSHORES CLIENT</span>
-                <div id="patch-badge" class="badge hidden">IP PATCHED</div>
+                <div id="version-badge" class="badge hidden"></div>
               </div>
               <div class="status-title">
                 <span id="status-dot" class="large-dot"></span>
                 <span id="status-text">Checking installation…</span>
               </div>
-              <p class="status-copy">The classic client, configured for the OpenShores community server.</p>
+              <p class="status-copy">OpenShores, installed and kept up to date from the website.</p>
+
+              <div id="news" class="news hidden">
+                <span class="news-heading">NEWS</span>
+                <div id="news-list" class="news-list"></div>
+              </div>
 
               <div id="progress-area" class="progress-area hidden">
                 <div class="progress-copy"><strong id="progress-phase">Preparing</strong><span id="progress-percent">0%</span></div>
@@ -55,7 +60,7 @@
               </div>
               <div id="actions" class="actions hidden">
                 <button id="primary-action" class="primary" disabled>Loading…</button>
-                <div id="offline-designer-control" class="designer-dropdown">
+                <div id="offline-designer-control" class="designer-dropdown hidden">
                   <button id="offline-designer" class="secondary" aria-haspopup="menu" aria-expanded="false" disabled><span class="process-button-label">Offline Designers...</span><span class="dropdown-caret" aria-hidden="true">&#9662;</span></button>
                   <div id="offline-designer-menu" class="designer-menu" role="menu" hidden>
                     <button type="button" role="menuitem" data-designer-mode="spacecraft">Open Old Spaceship Designer</button>
@@ -68,7 +73,7 @@
 
             <aside class="quick-info">
               <div><span>GAME SOURCE</span><strong id="game-source">No server selected</strong></div>
-              <div><span>PATCH CHANNEL</span><strong id="patch-channel">Latest Release</strong></div>
+              <div><span>GAME VERSION</span><strong id="game-version">Not installed</strong></div>
               <div><span>INSTALL MODE</span><strong>Managed & verified</strong></div>
               <section id="linux-info"></section>
             </aside>
@@ -99,7 +104,7 @@
             <input id="account-password-confirm" class="hidden" type="password" maxlength="256" autocomplete="new-password">
             <div class="account-actions">
               <button id="login-account" class="primary">Log in</button>
-              <button id="register-account" class="secondary">Register</button>
+              <button id="register-account" class="secondary hidden">Register</button>
               <button id="cancel-register" class="secondary hidden">Cancel</button>
             </div>
             <div id="account-error" class="error-box hidden"></div>
@@ -137,15 +142,14 @@
                 <label>Game installation folder</label>
                 <div class="path-row"><div id="install-path" class="path-value">—</div><button id="open-folder" class="secondary" disabled>Open folder</button><button id="choose-folder" class="secondary">Browse…</button></div>
               </div>
-              <div class="setting-row"><div><strong>IP patch release</strong><p>Use the newest release automatically, pin a specific release, or disable the patch.</p></div><div class="setting-control"><button id="refresh-patch-releases" class="refresh-icon-button" type="button" aria-label="Refresh IP patch releases" title="Refresh IP patch releases"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6v5h-5M4 18v-5h5M18.4 9A7 7 0 0 0 6.8 6.4L4 9m16 6-2.8 2.6A7 7 0 0 1 5.6 15"/></svg></button><select id="patch-release" aria-label="IP patch release"><option value="latest">Latest Release</option><option class="patch-option-disabled" value="none">Disable IP Patch</option></select><span class="update-button-wrap" data-tooltip=""><button id="update-patch" class="secondary update-task-button"><span class="button-label">Update patch</span><span class="button-progress"></span></button></span></div></div>
-              <div class="setting-row"><div><strong>Refresh game files</strong><p>Verify clean source files, download changes, and apply the selected IP patch setting.</p></div><span class="update-button-wrap" data-tooltip=""><button id="refresh-game" class="secondary update-task-button"><span class="button-label">Update game</span><span class="button-progress"></span></button></span></div>
+              <div class="setting-row"><div><strong>Refresh game files</strong><p>Compare the installed version with the website and apply every patch that is missing, in order.</p></div><span class="update-button-wrap" data-tooltip=""><button id="refresh-game" class="secondary update-task-button"><span class="button-label">Update game</span><span class="button-progress"></span></button></span></div>
               <div class="setting-row danger-row"><div><strong>Uninstall game</strong><p>Remove only launcher-managed files from the selected folder.</p></div><button id="uninstall" class="danger">Uninstall</button></div>
             </div>
           </div>
           <div class="settings-group">
             <h2>Launcher settings</h2>
             <div class="settings-list">
-              <div class="setting-row"><div><strong>Launcher updates</strong><p>Check the GitHub releases feed for a newer launcher.</p><p id="update-check-result" class="update-check-result hidden" role="status" aria-live="polite"></p></div><span class="update-button-wrap" data-tooltip=""><button id="check-updates" class="secondary update-task-button"><span class="button-label">Check now</span><span class="button-progress"></span></button></span></div>
+              <div class="setting-row"><div><strong>Launcher updates</strong><p>Check the website for a newer launcher.</p><p id="update-check-result" class="update-check-result hidden" role="status" aria-live="polite"></p></div><span class="update-button-wrap" data-tooltip=""><button id="check-updates" class="secondary update-task-button"><span class="button-label">Check now</span><span class="button-progress"></span></button></span></div>
               <div class="setting-row theme-setting-row">
                 <div><strong>Theme</strong><p>Choose a built-in theme or customize the launcher with CSS.</p></div>
                 <div class="theme-controls">
@@ -164,15 +168,14 @@
                 </div>
               </div>
               <div class="setting-row related-setting-row"><div><strong>After launching game</strong><p>Choose what the launcher does after OpenShores starts.</p></div><div class="setting-control"><select id="game-launch-action" aria-label="After launching game"><option value="do_nothing">Do Nothing</option><option value="minimize">Minimize Launcher</option><option value="exit">Exit Launcher</option><option id="game-launch-open-logs" value="open_logs">Open Logs</option></select></div></div>
-              <div class="setting-row"><div><strong>After starting Designer</strong><p>Choose what the launcher does after an Offline Designer starts.</p></div><div class="setting-control"><select id="designer-launch-action" aria-label="After starting Designer"><option value="do_nothing">Do Nothing</option><option value="minimize">Minimize Launcher</option><option value="exit">Exit Launcher</option></select></div></div>
+              <div class="setting-row hidden"><div><strong>After starting Designer</strong><p>Choose what the launcher does after an Offline Designer starts.</p></div><div class="setting-control"><select id="designer-launch-action" aria-label="After starting Designer"><option value="do_nothing">Do Nothing</option><option value="minimize">Minimize Launcher</option><option value="exit">Exit Launcher</option></select></div></div>
               <div class="setting-row"><div><strong>Developer</strong><p>Enable launcher features intended for developers.</p></div><label class="toggle-switch" for="developer-mode"><input id="developer-mode" type="checkbox" role="switch"><span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span></label></div>
             </div>
           </div>
           <div class="links">
             <button data-url="https://openshores.net/">OpenShores website ↗</button>
-            <button data-url="https://github.com/Celarious/OpenShores-IP-Patch">IP patch source ↗</button>
-            <button data-url="https://github.com/Norway174/OpenShores-Launcher">OpenShores Launcher source ↗</button>
-            <span class="creator-credit">Made by Norway174</span>
+            <button data-url="https://github.com/Norway174/OpenShores-Launcher">Original launcher source ↗</button>
+            <span class="creator-credit">Made by Norway174 · OpenShores edition by Aerxesius</span>
           </div>
         </section>
       </div>

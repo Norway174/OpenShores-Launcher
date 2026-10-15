@@ -1,7 +1,7 @@
 {
   "name": "openshores-launcher",
   "version": "1.0.16",
-  "description": "A modern Windows launcher for OpenShores",
+  "description": "A modern launcher for OpenShores",
   "author": "Norway174",
   "license": "",
   "scripts": {

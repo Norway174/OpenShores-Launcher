@@ -1,15 +1,24 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod chain;
+mod install;
+
+use install::{
+    directory_file_bytes, is_managed_manifest, read_json, write_json, Site, HPATCHZ_NAME, LOGIN_EXPIRED,
+    MANIFEST_FILE,
+};
+#[cfg(test)]
+use install::{bytes_to_download, format_bytes, require_free_space};
 use psl::{List, Psl};
 use reqwest::{
     blocking::{Client, Response},
     Url,
 };
 use rfd::{MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha1::Sha1;
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use std::{
     collections::HashMap,
     env,
@@ -25,7 +34,6 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
-use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use which::which;
 use typed_path::WindowsPath;
 
@@ -41,25 +49,20 @@ use std::os::unix::process::CommandExt;
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::PermissionsExt;
 
-const GAME_MANIFEST_URL: &str = "https://openshores.net/downloads/manifest.json";
-const PATCH_RELEASE_API: &str =
-    "https://api.github.com/repos/Celarious/OpenShores-IP-Patch/releases?per_page=100";
-const LAUNCHER_RELEASE_API: &str =
-    "https://api.github.com/repos/Norway174/OpenShores-Launcher/releases?per_page=100";
-const GAME_EXE: &str = "Shores of Hazeron.exe";
-const GAME_DLL: &str = "AuLoginClient13.dll";
+const LAUNCHER_FILE: &str = "OpenShores-Launcher.exe";
+const NEWS_ITEMS: usize = 4;
+const LOGIN_NEEDED: &str = "Log in to download and update the game.";
+const SESSION_COOKIE: &str = "sessionid";
+const LAUNCHER_HEADER: &str = "X-OpenShores-Launcher";
+const GAME_EXE: &str = "OpenShores.exe";
 const CLIENT_LOG: &str = "ClientInterface.log";
 const LOG_READ_CHUNK_SIZE: u64 = 1024 * 1024;
-const MANIFEST_FILE: &str = ".openshores-launcher.json";
-const MANAGED_BY: &str = "OpenShores Launcher";
-const LATEST_PATCH_RELEASE: &str = "latest";
-const DISABLED_PATCH_RELEASE: &str = "none";
 const PATCH_ORIGINALS_DIR: &str = ".openshores-patch-originals";
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const METADATA_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-const XDELTA_TIMEOUT: Duration = Duration::from_secs(120);
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-const DEFAULT_SERVER_HOST: &str = "play.openshores.net";
+const DEFAULT_SERVER_HOST: &str = "openshores.net";
+const OLD_DEFAULT_SERVER_HOST: &str = "play.openshores.net";
 const WINE_NAME: &str = "wine";
 const DEFAULT_DARK_THEME: &str = "default-dark";
 const DEFAULT_LIGHT_THEME: &str = "default-light";
@@ -74,15 +77,9 @@ const DEFAULT_DARK_CSS: &str = include_str!("../../src/renderer/styles.css");
 
 // OS-specific constants
 #[cfg(windows)]
-const XDELTA_NAME: &str = "xdelta3-3.0.11-x86_64.exe";
-#[cfg(windows)]
-const XDELTA_BYTES: &[u8] = include_bytes!("../../resources/xdelta3/xdelta3-3.0.11-x86_64.exe");
-#[cfg(windows)]
-const ACCOUNT_REGISTRY_PATH: &str = r"Software\Software Engineering\Shores of Hazeron\Account";
+const ACCOUNT_REGISTRY_PATH: &str = r"Software\OpenShores\OpenShores\Account";
 #[cfg(target_os = "linux")]
-const XDELTA_NAME: &str = "xdelta3";
-#[cfg(target_os = "linux")]
-const ACCOUNT_REGISTRY_PATH: &str = r"S-1-5-21-0-0-0-1000\Software\Software Engineering\Shores of Hazeron\Account";
+const ACCOUNT_REGISTRY_PATH: &str = r"S-1-5-21-0-0-0-1000\Software\OpenShores\OpenShores\Account";
 
 type LauncherResult<T> = Result<T, String>;
 
@@ -115,13 +112,6 @@ impl Drop for OperationGuard {
 struct LauncherConfig {
     #[serde(rename = "installPath", skip_serializing_if = "Option::is_none")]
     install_path: Option<String>,
-    #[serde(rename = "ipPatchRelease", default = "default_patch_release")]
-    ip_patch_release: String,
-    #[serde(
-        rename = "appliedIpPatchRelease",
-        skip_serializing_if = "Option::is_none"
-    )]
-    applied_ip_patch_release: Option<String>,
     #[serde(default)]
     servers: Option<Vec<ServerConfig>>,
     #[serde(
@@ -158,8 +148,6 @@ impl Default for LauncherConfig {
     fn default() -> Self {
         Self {
             install_path: None,
-            ip_patch_release: default_patch_release(),
-            applied_ip_patch_release: None,
             servers: Some(vec![default_server()]),
             connected_server_id: None,
             accounts: Vec::new(),
@@ -175,10 +163,6 @@ impl Default for LauncherConfig {
 
 fn default_theme() -> String {
     DEFAULT_DARK_THEME.to_string()
-}
-
-fn default_patch_release() -> String {
-    LATEST_PATCH_RELEASE.to_string()
 }
 
 fn default_post_launch_action() -> String {
@@ -199,6 +183,8 @@ struct SavedAccount {
     server_id: String,
     username: String,
     password_sha1: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    session: Option<String>,
 }
 
 fn default_server() -> ServerConfig {
@@ -250,8 +236,8 @@ struct LauncherSnapshot {
     busy: bool,
     game_running: bool,
     designer_running: bool,
-    ip_patch_release: String,
-    applied_ip_patch_release: Option<String>,
+    installed_version: Option<String>,
+    logged_in: bool,
     servers: Vec<ServerSnapshot>,
     connected_server_id: Option<String>,
     account_username: Option<String>,
@@ -278,16 +264,6 @@ struct ThemeEditorDocument {
     id: Option<String>,
     name: String,
     css: String,
-}
-
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PatchReleaseOption {
-    tag: String,
-    name: String,
-    published_at: Option<String>,
-    has_zip: bool,
-    prerelease: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -360,21 +336,6 @@ struct LogFileOption {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-struct GithubRelease {
-    tag_name: String,
-    name: Option<String>,
-    body: Option<String>,
-    html_url: String,
-    published_at: Option<String>,
-    #[serde(default)]
-    draft: bool,
-    #[serde(default)]
-    prerelease: bool,
-    #[serde(default)]
-    assets: Vec<GithubAsset>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
 struct GithubAsset {
     name: String,
     browser_download_url: String,
@@ -382,23 +343,6 @@ struct GithubAsset {
     #[serde(default)]
     size: u64,
 }
-
-#[derive(Clone, Debug, Deserialize)]
-struct GameManifest {
-    version: String,
-    generated: u64,
-    base_url: String,
-    total_size: u64,
-    files: Vec<GameManifestFile>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct GameManifestFile {
-    path: String,
-    size: u64,
-    sha256: String,
-}
-
 
 #[cfg(windows)]
 fn local_app_data() -> LauncherResult<PathBuf> {
@@ -587,31 +531,12 @@ fn program_files_install_path() -> PathBuf {
         .join("OpenShores")
 }
 
-fn read_json<T: DeserializeOwned>(path: &Path) -> Option<T> {
-    fs::read_to_string(path)
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-}
-
-fn write_json<T: Serialize>(path: &Path, value: &T) -> LauncherResult<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(error_string)?;
-    }
-    let text = serde_json::to_string_pretty(value).map_err(error_string)?;
-    fs::write(path, text).map_err(error_string)
-}
 
 fn path_eq(left: &Path, right: &Path) -> bool {
     left.to_string_lossy()
         .eq_ignore_ascii_case(&right.to_string_lossy())
 }
 
-fn is_managed_manifest(manifest: Option<&Value>) -> bool {
-    manifest
-        .and_then(|value| value.get("managedBy"))
-        .and_then(Value::as_str)
-        == Some(MANAGED_BY)
-}
 
 fn load_config() -> LauncherResult<LauncherConfig> {
     let path = config_path()?;
@@ -677,6 +602,16 @@ fn load_config() -> LauncherResult<LauncherConfig> {
         config.log_font_size = None;
         changed = true;
     }
+    for server in config.servers.iter_mut().flatten() {
+        if server.host.eq_ignore_ascii_case(OLD_DEFAULT_SERVER_HOST) {
+            server.host = DEFAULT_SERVER_HOST.to_string();
+            changed = true;
+        }
+    }
+    if config.servers.as_ref().is_none_or(|servers| servers.is_empty()) {
+        config.servers = Some(vec![default_server()]);
+        changed = true;
+    }
     let server_ids: Vec<String> = config
         .servers
         .as_ref()
@@ -702,6 +637,10 @@ fn load_config() -> LauncherResult<LauncherConfig> {
             changed = true;
         }
     }
+    if config.connected_server_id.is_none() {
+        config.connected_server_id = server_ids.first().cloned();
+        changed = config.connected_server_id.is_some() || changed;
+    }
     if changed || !path.is_file() {
         write_json(&path, &config)?;
     }
@@ -712,17 +651,6 @@ fn save_install_path(install_path: &Path) -> LauncherResult<()> {
     let mut config = load_config()?;
     config.install_path = Some(install_path.to_string_lossy().into_owned());
     write_json(&config_path()?, &config)
-}
-
-fn save_patch_selection(selection: String) -> LauncherResult<LauncherConfig> {
-    let mut config = load_config()?;
-    config.ip_patch_release = if selection.trim().is_empty() {
-        default_patch_release()
-    } else {
-        selection
-    };
-    write_json(&config_path()?, &config)?;
-    Ok(config)
 }
 
 fn save_developer_mode(enabled: bool) -> LauncherResult<()> {
@@ -775,12 +703,6 @@ fn save_selected_theme(selected_theme: String) -> LauncherResult<()> {
     write_json(&config_path()?, &config)
 }
 
-fn save_applied_patch_release(tag: Option<&str>) -> LauncherResult<()> {
-    let mut config = load_config()?;
-    config.applied_ip_patch_release = tag.map(str::to_string);
-    write_json(&config_path()?, &config)
-}
-
 fn get_snapshot(state: &AppState) -> LauncherResult<LauncherSnapshot> {
     let mut config = load_config()?;
     let themes = list_themes()?;
@@ -815,13 +737,20 @@ fn get_snapshot(state: &AppState) -> LauncherResult<LauncherSnapshot> {
             host: server.host,
         })
         .collect();
-    let account_username = config.connected_server_id.as_deref().and_then(|server_id| {
+    let account = config.connected_server_id.as_deref().and_then(|server_id| {
         config
             .accounts
             .iter()
             .find(|account| account.server_id == server_id)
-            .map(|account| account.username.clone())
     });
+    let account_username = account.map(|account| account.username.clone());
+    let logged_in = account.is_some_and(|account| account.session.is_some());
+    let installed_version = manifest
+        .as_ref()
+        .filter(|_| installed)
+        .and_then(|manifest| manifest.get("version"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
     Ok(LauncherSnapshot {
         launcher_version: env!("OPENSHORES_LAUNCHER_VERSION").to_string(),
         installed,
@@ -830,8 +759,8 @@ fn get_snapshot(state: &AppState) -> LauncherResult<LauncherSnapshot> {
         busy: state.active_operation.load(Ordering::SeqCst),
         game_running,
         designer_running,
-        ip_patch_release: config.ip_patch_release,
-        applied_ip_patch_release: config.applied_ip_patch_release,
+        installed_version,
+        logged_in,
         servers,
         connected_server_id: config.connected_server_id,
         account_username,
@@ -1079,17 +1008,17 @@ fn fetch_server_status(client: &Client, server: &ServerConfig) -> ServerStatus {
 }
 
 #[cfg(windows)]
-fn write_game_account_registry(host: &str, account: Option<&SavedAccount>) -> LauncherResult<bool> {
+fn write_game_account_registry(account: Option<&SavedAccount>) -> LauncherResult<bool> {
     let current_user = RegKey::predef(HKEY_CURRENT_USER);
     let (key, _) = current_user
         .create_subkey(ACCOUNT_REGISTRY_PATH)
         .map_err(error_string)?;
-    key.set_value("Host", &host).map_err(error_string)?;
     if let Some(account) = account {
         let password = hazeron_password_value_from_hex(&account.password_sha1)?;
         key.set_value("Name", &account.username)
             .map_err(error_string)?;
         key.set_value("Password", &password).map_err(error_string)?;
+        key.set_value("SavePass", &1_u32).map_err(error_string)?;
         Ok(true)
     } else {
         Ok(false)
@@ -1120,7 +1049,7 @@ fn write_wine_password_registry(
 ) -> LauncherResult<()> {
     let temp = launcher_temp_path()?;
     fs::create_dir_all(&temp).map_err(error_string)?;
-    let import_path = temp.join(format!("account-password-{}.reg", unique_token()));
+    let import_path = temp.join(format!("account-password-{}.reg", install::unique_token()));
     fs::write(
         &import_path,
         wine_password_registry_import(key, password_value),
@@ -1133,17 +1062,10 @@ fn write_wine_password_registry(
 }
 
 #[cfg(target_os = "linux")]
-fn write_game_account_registry(
-    host: &str,
-    account: Option<&SavedAccount>,
-) -> LauncherResult<bool> {
+fn write_game_account_registry(account: Option<&SavedAccount>) -> LauncherResult<bool> {
     let key = format!("HKEY_USERS\\{}", ACCOUNT_REGISTRY_PATH);
     let wine = which(WINE_NAME).map_err(error_string)?;
 
-    run_wine_registry_command(
-        &wine,
-        &["REG", "ADD", &key, "/v", "Host", "/t", "REG_SZ", "/d", host, "/f"],
-    )?;
     if let Some(account) = account {
         run_wine_registry_command(
             &wine,
@@ -1173,13 +1095,6 @@ fn write_game_account_registry(
 
 }
 
-fn format_bytes(bytes: u64) -> String {
-    if bytes < 1024 * 1024 {
-        format!("{:.1} KB", bytes as f64 / 1024.0)
-    } else {
-        format!("{:.1} MB", bytes as f64 / 1024.0 / 1024.0)
-    }
-}
 
 fn checked_response(response: Response, description: &str) -> LauncherResult<Response> {
     if response.status().is_success() {
@@ -1189,288 +1104,6 @@ fn checked_response(response: Response, description: &str) -> LauncherResult<Res
     }
 }
 
-fn manifest_relative_path(value: &str) -> LauncherResult<PathBuf> {
-    let mut path = PathBuf::new();
-    for segment in value.split('/') {
-        if segment.is_empty() || segment == "." || segment == ".." || segment.contains(['\\', ':'])
-        {
-            return Err(format!(
-                "The game manifest contains an unsafe path: {value}"
-            ));
-        }
-        path.push(segment);
-    }
-    if path.as_os_str().is_empty()
-        || path
-            .components()
-            .any(|component| !matches!(component, Component::Normal(_)))
-    {
-        return Err(format!(
-            "The game manifest contains an unsafe path: {value}"
-        ));
-    }
-    Ok(path)
-}
-
-fn validate_game_manifest(manifest: &GameManifest) -> LauncherResult<()> {
-    if manifest.files.is_empty() {
-        return Err("The game manifest does not contain any files.".to_string());
-    }
-    manifest_base_url(manifest)?;
-    let mut paths = std::collections::HashSet::new();
-    let mut total_size = 0_u64;
-    for entry in &manifest.files {
-        manifest_relative_path(&entry.path)?;
-        if !paths.insert(entry.path.to_ascii_lowercase()) {
-            return Err(format!(
-                "The game manifest contains a duplicate path: {}",
-                entry.path
-            ));
-        }
-        if entry.sha256.len() != 64 || !entry.sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err(format!(
-                "The game manifest contains an invalid checksum for {}.",
-                entry.path
-            ));
-        }
-        total_size = total_size
-            .checked_add(entry.size)
-            .ok_or_else(|| "The game manifest size is invalid.".to_string())?;
-    }
-    if total_size != manifest.total_size {
-        return Err("The game manifest total size does not match its file entries.".to_string());
-    }
-    for required in [GAME_EXE, GAME_DLL] {
-        if !manifest
-            .files
-            .iter()
-            .any(|entry| entry.path.eq_ignore_ascii_case(required))
-        {
-            return Err(format!("The game manifest is missing {required}."));
-        }
-    }
-    Ok(())
-}
-
-fn manifest_base_url(manifest: &GameManifest) -> LauncherResult<Url> {
-    let manifest_url = Url::parse(GAME_MANIFEST_URL).map_err(error_string)?;
-    let base_url = manifest_url
-        .join(&manifest.base_url)
-        .map_err(error_string)?;
-    if base_url.scheme() != "https" || base_url.host_str() != manifest_url.host_str() {
-        return Err("The game manifest contains an untrusted base URL.".to_string());
-    }
-    Ok(base_url)
-}
-
-fn fetch_game_manifest(client: &Client) -> LauncherResult<GameManifest> {
-    let response = checked_response(
-        client
-            .get(GAME_MANIFEST_URL)
-            .timeout(METADATA_REQUEST_TIMEOUT)
-            .send()
-            .map_err(error_string)?,
-        "Game manifest download",
-    )?;
-    let manifest: GameManifest = response.json().map_err(error_string)?;
-    validate_game_manifest(&manifest)?;
-    Ok(manifest)
-}
-
-fn manifest_file_url(manifest: &GameManifest, entry: &GameManifestFile) -> LauncherResult<Url> {
-    let mut url = manifest_base_url(manifest)?;
-    {
-        let mut segments = url
-            .path_segments_mut()
-            .map_err(|_| "The game manifest base URL is invalid.".to_string())?;
-        segments.pop_if_empty();
-        for segment in entry.path.split('/') {
-            segments.push(segment);
-        }
-    }
-    Ok(url)
-}
-
-fn download_manifest_file(
-    app: &AppHandle,
-    client: &Client,
-    manifest: &GameManifest,
-    entry: &GameManifestFile,
-    destination: &Path,
-    completed_bytes: u64,
-    index: usize,
-) -> LauncherResult<()> {
-    if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent).map_err(error_string)?;
-    }
-    let url = manifest_file_url(manifest, entry)?;
-    let mut response = checked_response(
-        client.get(url).send().map_err(error_string)?,
-        &format!("Game file download ({})", entry.path),
-    )?;
-    let mut output = File::create(destination).map_err(error_string)?;
-    let mut buffer = vec![0_u8; 128 * 1024];
-    let mut received = 0_u64;
-    loop {
-        let count = response.read(&mut buffer).map_err(error_string)?;
-        if count == 0 {
-            break;
-        }
-        output.write_all(&buffer[..count]).map_err(error_string)?;
-        received += count as u64;
-        let overall = completed_bytes.saturating_add(received);
-        let ratio = if manifest.total_size > 0 {
-            overall as f64 / manifest.total_size as f64
-        } else {
-            0.0
-        };
-        let previous_overall = overall.saturating_sub(count as u64);
-        let crossed_progress_step = overall / (1024 * 1024) != previous_overall / (1024 * 1024);
-        let final_file_complete = index == manifest.files.len() && received == entry.size;
-        if crossed_progress_step || final_file_complete {
-            emit_progress(
-                app,
-                "Updating clean game files",
-                2.0 + ratio * 66.0,
-                format!(
-                    "Downloading file {index} of {} ({})",
-                    manifest.files.len(),
-                    format_bytes(overall)
-                ),
-            );
-        }
-    }
-    output.flush().map_err(error_string)?;
-    if received != entry.size {
-        return Err(format!(
-            "{} downloaded with the wrong size (expected {}, received {}).",
-            entry.path, entry.size, received
-        ));
-    }
-    let actual = sha256_file(destination)?;
-    if !actual.eq_ignore_ascii_case(&entry.sha256) {
-        return Err(format!("Checksum verification failed for {}.", entry.path));
-    }
-    Ok(())
-}
-
-fn stage_game_from_manifest(
-    app: &AppHandle,
-    client: &Client,
-    manifest: &GameManifest,
-    existing_install: &Path,
-    game_root: &Path,
-) -> LauncherResult<(usize, usize)> {
-    let existing_clean_root = existing_install.join(PATCH_ORIGINALS_DIR);
-    let staged_clean_root = game_root.join(PATCH_ORIGINALS_DIR);
-    let mut completed_bytes = 0_u64;
-    let mut reused = 0;
-    let mut downloaded = 0;
-    for (offset, entry) in manifest.files.iter().enumerate() {
-        let relative = manifest_relative_path(&entry.path)?;
-        let existing_clean = existing_clean_root.join(&relative);
-        let staged_clean = staged_clean_root.join(&relative);
-        let valid_clean = if existing_clean.is_file()
-            && fs::metadata(&existing_clean).map_err(error_string)?.len() == entry.size
-        {
-            sha256_file(&existing_clean)?.eq_ignore_ascii_case(&entry.sha256)
-        } else {
-            false
-        };
-        if let Some(parent) = staged_clean.parent() {
-            fs::create_dir_all(parent).map_err(error_string)?;
-        }
-        if valid_clean {
-            fs::copy(&existing_clean, &staged_clean).map_err(error_string)?;
-            reused += 1;
-        } else {
-            download_manifest_file(
-                app,
-                client,
-                manifest,
-                entry,
-                &staged_clean,
-                completed_bytes,
-                offset + 1,
-            )?;
-            downloaded += 1;
-        }
-        let working = game_root.join(&relative);
-        if let Some(parent) = working.parent() {
-            fs::create_dir_all(parent).map_err(error_string)?;
-        }
-        fs::copy(&staged_clean, &working).map_err(error_string)?;
-        completed_bytes = completed_bytes.saturating_add(entry.size);
-        if valid_clean && ((offset + 1) % 10 == 0 || offset + 1 == manifest.files.len()) {
-            emit_progress(
-                app,
-                "Updating clean game files",
-                2.0 + completed_bytes as f64 / manifest.total_size as f64 * 66.0,
-                format!(
-                    "Verified {} of {} clean files",
-                    offset + 1,
-                    manifest.files.len()
-                ),
-            );
-        }
-    }
-    Ok((reused, downloaded))
-}
-
-fn download(
-    app: &AppHandle,
-    client: &Client,
-    url: &str,
-    destination: &Path,
-    phase: &str,
-    range_start: f64,
-    range_end: f64,
-) -> LauncherResult<()> {
-    let mut response = checked_response(client.get(url).send().map_err(error_string)?, "Download")?;
-    let total = response.content_length().unwrap_or(0);
-    let mut output = File::create(destination).map_err(error_string)?;
-    let mut buffer = vec![0_u8; 128 * 1024];
-    let mut received = 0_u64;
-    loop {
-        let count = response.read(&mut buffer).map_err(error_string)?;
-        if count == 0 {
-            break;
-        }
-        output.write_all(&buffer[..count]).map_err(error_string)?;
-        received += count as u64;
-        let ratio = if total > 0 {
-            received as f64 / total as f64
-        } else {
-            0.0
-        };
-        let detail = if total > 0 {
-            format!("{} of {}", format_bytes(received), format_bytes(total))
-        } else {
-            format_bytes(received)
-        };
-        emit_progress(
-            app,
-            phase,
-            range_start + ratio * (range_end - range_start),
-            detail,
-        );
-    }
-    output.flush().map_err(error_string)
-}
-
-fn sha256_file(path: &Path) -> LauncherResult<String> {
-    let mut input = File::open(path).map_err(error_string)?;
-    let mut hash = Sha256::new();
-    let mut buffer = vec![0_u8; 128 * 1024];
-    loop {
-        let count = input.read(&mut buffer).map_err(error_string)?;
-        if count == 0 {
-            break;
-        }
-        hash.update(&buffer[..count]);
-    }
-    Ok(format!("{:x}", hash.finalize()))
-}
 
 fn verify_asset_digest(path: &Path, asset: &GithubAsset) -> LauncherResult<()> {
     if let Some(expected) = asset
@@ -1478,7 +1111,7 @@ fn verify_asset_digest(path: &Path, asset: &GithubAsset) -> LauncherResult<()> {
         .as_deref()
         .and_then(|digest| digest.strip_prefix("sha256:"))
     {
-        let actual = sha256_file(path)?;
+        let actual = chain::sha256_file(path)?;
         if !actual.eq_ignore_ascii_case(expected) {
             return Err(format!("Checksum verification failed for {}.", asset.name));
         }
@@ -1488,506 +1121,78 @@ fn verify_asset_digest(path: &Path, asset: &GithubAsset) -> LauncherResult<()> {
 
 fn verify_launcher_digest(path: &Path, asset: &GithubAsset) -> LauncherResult<()> {
     if asset.digest.is_none() {
-        return Err("GitHub did not provide a checksum for the launcher update.".to_string());
+        return Err("The website did not provide a checksum for the launcher update.".to_string());
     }
     verify_asset_digest(path, asset)
 }
 
-fn extract_zip(zip_path: &Path, destination: &Path) -> LauncherResult<()> {
-    let input = File::open(zip_path).map_err(error_string)?;
-    let mut archive = zip::ZipArchive::new(input).map_err(error_string)?;
-    for index in 0..archive.len() {
-        let mut entry = archive.by_index(index).map_err(error_string)?;
-        let enclosed = entry
-            .enclosed_name()
-            .ok_or_else(|| "The ZIP archive contains an unsafe path.".to_string())?;
-        let output_path = destination.join(enclosed);
-        if entry.is_dir() {
-            fs::create_dir_all(&output_path).map_err(error_string)?;
-        } else {
-            if let Some(parent) = output_path.parent() {
-                fs::create_dir_all(parent).map_err(error_string)?;
-            }
-            let mut output = File::create(&output_path).map_err(error_string)?;
-            std::io::copy(&mut entry, &mut output).map_err(error_string)?;
-        }
-    }
-    Ok(())
+
+
+fn is_session_value(value: &str) -> bool {
+    (16..=128).contains(&value.len()) && value.bytes().all(|byte| byte.is_ascii_alphanumeric())
 }
 
-#[cfg(windows)]
-fn ensure_xdelta() -> LauncherResult<PathBuf> {
-    let path = launcher_data_path()?
-        .join("app")
-        .join("resources")
-        .join(XDELTA_NAME);
-    let must_write = match fs::metadata(&path) {
-        Ok(metadata) => metadata.len() != XDELTA_BYTES.len() as u64,
-        Err(_) => true,
-    };
-    if must_write {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(error_string)?;
-        }
-        fs::write(&path, XDELTA_BYTES).map_err(error_string)?;
-    }
-    Ok(path)
-}
 
-#[cfg(target_os = "linux")]
-fn ensure_xdelta() -> LauncherResult<PathBuf> {
-    which(XDELTA_NAME)
+fn site_client(account: &SavedAccount) -> LauncherResult<Client> {
+    let session = account
+        .session
+        .as_deref()
+        .filter(|value| is_session_value(value))
+        .ok_or_else(|| LOGIN_NEEDED.to_string())?;
+    let mut cookie = reqwest::header::HeaderValue::from_str(&format!("{SESSION_COOKIE}={session}"))
+        .map_err(error_string)?;
+    cookie.set_sensitive(true);
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(reqwest::header::COOKIE, cookie);
+    Client::builder()
+        .user_agent(format!(
+            "OpenShores-Launcher/{}",
+            env!("OPENSHORES_LAUNCHER_VERSION")
+        ))
+        .connect_timeout(HTTP_CONNECT_TIMEOUT)
+        .default_headers(headers)
+        .build()
         .map_err(error_string)
 }
 
-fn apply_delta(source: &Path, delta: &Path, output: &Path) -> LauncherResult<()> {
-    let executable = ensure_xdelta()?;
-    let mut command = Command::new(executable);
-    command
-        .args(["-d", "-f", "-s"])
-        .arg(source)
-        .arg(delta)
-        .arg(output);
-    #[cfg(windows)]
-    command.creation_flags(CREATE_NO_WINDOW);
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = command.spawn().map_err(error_string)?;
-    let started = std::time::Instant::now();
-    loop {
-        if child.try_wait().map_err(error_string)?.is_some() {
-            break;
-        }
-        if started.elapsed() >= XDELTA_TIMEOUT {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(format!(
-                "Applying {} timed out after {} seconds.",
-                delta.file_name().unwrap_or_default().to_string_lossy(),
-                XDELTA_TIMEOUT.as_secs()
-            ));
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-    let result = child.wait_with_output().map_err(error_string)?;
-    if result.status.success() {
-        Ok(())
-    } else {
-        let detail = String::from_utf8_lossy(&result.stderr).trim().to_string();
-        Err(format!(
-            "The IP patch did not match {}. {}",
-            source.file_name().unwrap_or_default().to_string_lossy(),
-            if detail.is_empty() {
-                format!("xdelta exited with {}", result.status)
-            } else {
-                detail
-            }
-        ))
-    }
-}
-
-fn fetch_patch_releases(client: &Client) -> LauncherResult<Vec<GithubRelease>> {
-    let response = checked_response(
-        client
-            .get(PATCH_RELEASE_API)
-            .timeout(METADATA_REQUEST_TIMEOUT)
-            .send()
-            .map_err(error_string)?,
-        "IP patch release check",
-    )?;
-    let mut releases: Vec<GithubRelease> = response.json().map_err(error_string)?;
-    releases.retain(|release| !release.draft && !release.prerelease);
-    releases.sort_by(|left, right| right.published_at.cmp(&left.published_at));
-    if releases.is_empty() {
-        return Err("No IP patch releases are available.".to_string());
-    }
-    Ok(releases)
-}
-
-fn patch_release_options(releases: &[GithubRelease]) -> Vec<PatchReleaseOption> {
-    releases
+fn fetch_chain(config: &LauncherConfig) -> LauncherResult<Site> {
+    let server = connected_server(config)?;
+    let account = config
+        .accounts
         .iter()
-        .map(|release| PatchReleaseOption {
-            tag: release.tag_name.clone(),
-            name: release
-                .name
-                .clone()
-                .filter(|name| !name.trim().is_empty())
-                .unwrap_or_else(|| release.tag_name.clone()),
-            published_at: release.published_at.clone(),
-            has_zip: patch_zip_asset(release).is_some(),
-            prerelease: release.prerelease,
-        })
-        .collect()
-}
-
-fn resolve_patch_release(
-    releases: &[GithubRelease],
-    selection: &str,
-) -> LauncherResult<GithubRelease> {
-    if selection.eq_ignore_ascii_case(LATEST_PATCH_RELEASE) {
-        return releases
-            .iter()
-            .find(|release| !release.prerelease)
-            .cloned()
-            .ok_or_else(|| "No stable IP patch releases are available.".to_string());
+        .find(|account| account.server_id == server.id)
+        .ok_or_else(|| LOGIN_NEEDED.to_string())?;
+    let client = site_client(account)?;
+    let response = client
+        .get(server_api_url(&server.host, "patches")?)
+        .timeout(METADATA_REQUEST_TIMEOUT)
+        .send()
+        .map_err(|_| "Could not reach the website.".to_string())?;
+    match response.status().as_u16() {
+        401 | 403 => return Err(LOGIN_EXPIRED.to_string()),
+        404 => return Err("There are no downloads right now.".to_string()),
+        _ => {}
     }
-    releases
-        .iter()
-        .find(|release| release.tag_name == selection)
-        .cloned()
-        .ok_or_else(|| format!("The selected IP patch release ({selection}) no longer exists."))
-}
-
-fn patch_zip_asset(release: &GithubRelease) -> Option<&GithubAsset> {
-    let expected = format!("{}.zip", release.tag_name);
-    release
-        .assets
-        .iter()
-        .find(|asset| asset.name.eq_ignore_ascii_case(&expected))
-        .or_else(|| {
-            release
-                .assets
-                .iter()
-                .find(|asset| asset.name.to_ascii_lowercase().ends_with(".zip"))
-        })
-}
-
-fn copy_tree_overwrite(source: &Path, destination: &Path) -> LauncherResult<()> {
-    fs::create_dir_all(destination).map_err(error_string)?;
-    for entry in fs::read_dir(source).map_err(error_string)? {
-        let entry = entry.map_err(error_string)?;
-        let target = destination.join(entry.file_name());
-        if entry.file_type().map_err(error_string)?.is_dir() {
-            copy_tree_overwrite(&entry.path(), &target)?;
-        } else {
-            fs::copy(entry.path(), target).map_err(error_string)?;
-        }
-    }
-    Ok(())
-}
-
-fn collect_files_with_extension(
-    directory: &Path,
-    extension: &str,
-    files: &mut Vec<PathBuf>,
-) -> LauncherResult<()> {
-    for entry in fs::read_dir(directory).map_err(error_string)? {
-        let entry = entry.map_err(error_string)?;
-        let path = entry.path();
-        if entry.file_type().map_err(error_string)?.is_dir() {
-            if !entry
-                .file_name()
-                .to_string_lossy()
-                .eq_ignore_ascii_case(PATCH_ORIGINALS_DIR)
-            {
-                collect_files_with_extension(&path, extension, files)?;
-            }
-        } else if path
-            .extension()
-            .is_some_and(|value| value.to_string_lossy().eq_ignore_ascii_case(extension))
-        {
-            files.push(path);
-        }
-    }
-    Ok(())
-}
-
-fn normalized_xdelta_source_name(value: &str) -> Option<String> {
-    // Source filenames from xdelta3 will be Windows paths - typed-path is used to get
-    // the same parsing behavior on Linux.
-
-    let filename = value.split('#').next()?.trim();
-    let path = WindowsPath::new(filename);
-    let extension = str::from_utf8(path.extension()?).ok()?;
-    let mut stem = str::from_utf8(path.file_stem()?).ok()?.to_string();
-    for suffix in [" old", " new", " patched"] {
-        if stem.to_ascii_lowercase().ends_with(suffix) {
-            stem.truncate(stem.len() - suffix.len());
-            break;
-        }
-    }
-    Some(format!("{stem}.{extension}"))
-}
-
-fn xdelta_source_name(delta: &Path) -> LauncherResult<String> {
-    let executable = ensure_xdelta()?;
-    let mut command = Command::new(executable);
-    command.arg("printhdr").arg(delta);
-    #[cfg(windows)]
-    command.creation_flags(CREATE_NO_WINDOW);
-    let output = command.output().map_err(error_string)?;
-    let combined = format!(
-        "{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    combined
-        .lines()
-        .find_map(|line| {
-            line.trim()
-                .strip_prefix("XDELTA filename (source):")
-                .and_then(normalized_xdelta_source_name)
-        })
-        .ok_or_else(|| {
-            format!(
-                "Could not determine the source file for {}.",
-                delta.display()
-            )
-        })
-}
-
-fn find_file_by_name(directory: &Path, filename: &str) -> LauncherResult<Option<PathBuf>> {
-    for entry in fs::read_dir(directory).map_err(error_string)? {
-        let entry = entry.map_err(error_string)?;
-        if entry
-            .file_name()
-            .to_string_lossy()
-            .eq_ignore_ascii_case(PATCH_ORIGINALS_DIR)
-        {
-            continue;
-        }
-        let path = entry.path();
-        if entry.file_type().map_err(error_string)?.is_dir() {
-            if let Some(found) = find_file_by_name(&path, filename)? {
-                return Ok(Some(found));
-            }
-        } else if entry
-            .file_name()
-            .to_string_lossy()
-            .eq_ignore_ascii_case(filename)
-        {
-            return Ok(Some(path));
-        }
-    }
-    Ok(None)
-}
-
-fn apply_xdeltas(game_root: &Path) -> LauncherResult<(usize, usize)> {
-    let mut deltas = Vec::new();
-    collect_files_with_extension(game_root, "xdelta", &mut deltas)?;
-    let originals = game_root.join(PATCH_ORIGINALS_DIR);
-    let mut applied = 0;
-    let mut skipped = 0;
-    for delta in deltas {
-        let source_name = match xdelta_source_name(&delta) {
-            Ok(name) => name,
-            Err(_) => {
-                skipped += 1;
-                continue;
-            }
-        };
-        let nearby = delta.parent().unwrap_or(game_root).join(&source_name);
-        let target = if nearby.is_file() {
-            Some(nearby)
-        } else {
-            find_file_by_name(game_root, &source_name)?
-        };
-        let Some(target) = target else {
-            skipped += 1;
-            continue;
-        };
-        let relative = target.strip_prefix(game_root).map_err(error_string)?;
-        let original = originals.join(relative);
-        if !original.is_file() {
-            if let Some(parent) = original.parent() {
-                fs::create_dir_all(parent).map_err(error_string)?;
-            }
-            fs::copy(&target, &original).map_err(error_string)?;
-        }
-        let output = target.with_extension(format!(
-            "{}.patched",
-            target.extension().unwrap_or_default().to_string_lossy()
-        ));
-        if let Err(error) = apply_delta(&original, &delta, &output) {
-            let _ = fs::remove_file(&output);
-            return Err(error);
-        }
-        fs::copy(&output, &target).map_err(error_string)?;
-        fs::remove_file(&output).map_err(error_string)?;
-        fs::remove_file(&delta).map_err(error_string)?;
-        applied += 1;
-    }
-
-    if applied == 0 {
-        Err("Failed to apply any patches".to_string())
-    } else {
-        Ok((applied, skipped))
-    }
-}
-
-fn unique_token() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    format!("{}-{nanos:x}", std::process::id())
-}
-
-fn single_directory_or_self(path: &Path) -> LauncherResult<PathBuf> {
-    let entries: Vec<_> = fs::read_dir(path)
-        .map_err(error_string)?
-        .filter_map(Result::ok)
-        .collect();
-    if entries.len() == 1 && entries[0].file_type().map_err(error_string)?.is_dir() {
-        Ok(entries[0].path())
-    } else {
-        Ok(path.to_path_buf())
-    }
-}
-
-fn download_and_apply_patch(
-    app: &AppHandle,
-    client: &Client,
-    release: &GithubRelease,
-    game_root: &Path,
-    work: &Path,
-    range_start: f64,
-    range_end: f64,
-) -> LauncherResult<()> {
-    let asset = patch_zip_asset(release).ok_or_else(|| {
-        format!(
-            "IP patch release {} does not contain a ZIP asset.",
-            release.tag_name
-        )
-    })?;
-    fs::create_dir_all(work).map_err(error_string)?;
-    let zip_path = work.join(&asset.name);
-    let extract_path = work.join("extracted");
-    fs::create_dir_all(&extract_path).map_err(error_string)?;
-    download(
-        app,
+    let chain: chain::Chain = checked_response(response, "Patch list download")?
+        .json()
+        .map_err(|_| "The website's patch list could not be read.".to_string())?;
+    chain.validate()?;
+    Ok(Site {
         client,
-        &asset.browser_download_url,
-        &zip_path,
-        "Downloading the IP patch",
-        range_start,
-        range_end,
-    )?;
-    verify_asset_digest(&zip_path, asset)?;
-    emit_progress(
-        app,
-        "Unpacking the IP patch",
-        range_end,
-        format!("Installing files from {}...", asset.name),
-    );
-    extract_zip(&zip_path, &extract_path)?;
-    let patch_root = single_directory_or_self(&extract_path)?;
-    copy_tree_overwrite(&patch_root, game_root)?;
-    emit_progress(
-        app,
-        "Applying the IP patch",
-        (range_end + 96.0) / 2.0,
-        format!("Applying {}...", release.tag_name),
-    );
-    let (applied, skipped) = apply_xdeltas(game_root)?;
-    let detail = if skipped == 0 {
-        format!("Applied {applied} xdelta patch(es).")
-    } else {
-        format!("Applied {applied} xdelta patch(es); left {skipped} unmatched patch(es).")
-    };
-    emit_progress(app, "IP patch installed", 96.0, detail);
-    Ok(())
+        origin: format!("https://{}", account_domain(&server.host)),
+        chain,
+    })
 }
 
-fn update_manifest_patch(game_root: &Path, release: &GithubRelease) -> LauncherResult<()> {
-    let path = game_root.join(MANIFEST_FILE);
-    let mut manifest = read_json::<Value>(&path).unwrap_or_else(|| json!({}));
-    let object = manifest
-        .as_object_mut()
-        .ok_or_else(|| "The launcher manifest is invalid.".to_string())?;
-    object.insert("patchTag".to_string(), json!(release.tag_name));
-    object.insert("patchPublishedAt".to_string(), json!(release.published_at));
-    write_json(&path, &manifest)
+fn downloads_path() -> LauncherResult<PathBuf> {
+    Ok(launcher_temp_path()?.join("downloads"))
 }
 
-fn update_ip_patch_sync(
-    app: &AppHandle,
-    state: &AppState,
-    force: bool,
-) -> LauncherResult<LauncherSnapshot> {
-    if any_game_process_running(state)? {
-        return Err("Close OpenShores before updating the IP patch.".to_string());
-    }
-    let config = load_config()?;
-    let install_path = PathBuf::from(config.install_path.clone().unwrap());
-    if !is_managed_manifest(read_json::<Value>(&install_path.join(MANIFEST_FILE)).as_ref()) {
-        return get_snapshot(state);
-    }
-    if config
-        .ip_patch_release
-        .eq_ignore_ascii_case(DISABLED_PATCH_RELEASE)
-    {
-        return install_game_sync(app, state, install_path);
-    }
-    let guard = begin_operation(state)?;
-    if any_game_process_running(state)? {
-        return Err("Close OpenShores before updating the IP patch.".to_string());
-    }
-    emit_operation_status(app, true, None);
-    emit_progress(
-        app,
-        "Checking the IP patch",
-        1.0,
-        "Contacting GitHub for the selected release...",
-    );
-    let mut work = None;
-    let result = (|| {
-        let client = http_client()?;
-        let releases = fetch_patch_releases(&client)?;
-        let release = resolve_patch_release(&releases, &config.ip_patch_release)?;
-        if !force && config.applied_ip_patch_release.as_deref() == Some(&release.tag_name) {
-            emit_progress(
-                app,
-                "IP patch is up to date",
-                100.0,
-                format!("{} is already installed.", release.tag_name),
-            );
-            return get_snapshot(state);
-        }
-        emit_progress(
-            app,
-            "Checking the IP patch",
-            3.0,
-            format!("Selected release: {}", release.tag_name),
-        );
-        let patch_work = launcher_temp_path()?.join(format!("ip-patch-{}", unique_token()));
-        work = Some(patch_work.clone());
-        download_and_apply_patch(
-            app,
-            &client,
-            &release,
-            &install_path,
-            &patch_work,
-            5.0,
-            75.0,
-        )?;
-        update_manifest_patch(&install_path, &release)?;
-        save_applied_patch_release(Some(&release.tag_name))?;
-        emit_progress(
-            app,
-            "IP patch is up to date",
-            100.0,
-            format!("{} is installed.", release.tag_name),
-        );
-        get_snapshot(state)
-    })();
-    if let Some(work) = work {
-        let _ = fs::remove_dir_all(work);
-    }
-    drop(guard);
-    match result {
-        Ok(mut snapshot) => {
-            snapshot.busy = false;
-            emit_operation_status(app, false, None);
-            let _ = app.emit("state-changed", snapshot.clone());
-            Ok(snapshot)
-        }
-        Err(error) => {
-            emit_operation_status(app, false, Some(error.clone()));
-            Err(error)
-        }
-    }
+
+fn ensure_hpatchz() -> LauncherResult<PathBuf> {
+    install::ensure_hpatchz(&launcher_data_path()?)
 }
+
 
 fn install_game_sync(
     app: &AppHandle,
@@ -1995,128 +1200,73 @@ fn install_game_sync(
     install_path: PathBuf,
 ) -> LauncherResult<LauncherSnapshot> {
     let _guard = begin_operation(state)?;
-    if install_path.exists() {
-        let has_contents = fs::read_dir(&install_path)
-            .map_err(error_string)?
-            .next()
-            .is_some();
-        let manifest = read_json::<Value>(&install_path.join(MANIFEST_FILE));
-        if has_contents && !is_managed_manifest(manifest.as_ref()) {
-            return Err("The selected folder is not empty and is not managed by this launcher. Choose an empty folder to keep existing files safe.".to_string());
-        }
+    if any_game_process_running(state)? {
+        return Err("Close OpenShores before updating it.".to_string());
     }
+    let config = load_config()?;
+    emit_progress(
+        app,
+        "Checking the game version",
+        1.0,
+        "Asking the website for the patch list...",
+    );
+    let access = fetch_chain(&config)?;
+    let report = |phase: &str, percent: f64, detail: String| emit_progress(app, phase, percent, detail);
+    install::install(&report, &access, &ensure_hpatchz, &downloads_path()?, install_path.clone())?;
+    save_install_path(&install_path)?;
+    get_snapshot(state)
+}
 
-    let parent = install_path
-        .parent()
-        .ok_or_else(|| "The installation folder has no parent directory.".to_string())?;
-    fs::create_dir_all(parent).map_err(error_string)?;
-    let token = unique_token();
-    let work = parent.join(format!(".openshores-staging-{token}"));
-    let game_root = work.join("game");
-    let patch_path = work.join("patch");
-    let backup_path = parent.join(format!(".openshores-backup-{token}"));
-    let mut backup_active = false;
-
-    let result = (|| {
-        fs::create_dir_all(&game_root).map_err(error_string)?;
-        let client = http_client()?;
-
-        emit_progress(
-            app,
-            "Getting the game manifest",
-            1.0,
-            "Connecting to openshores.net...",
-        );
-        let game_manifest = fetch_game_manifest(&client)?;
-        let (reused, downloaded) =
-            stage_game_from_manifest(app, &client, &game_manifest, &install_path, &game_root)?;
-        emit_progress(
-            app,
-            "Clean game files ready",
-            69.0,
-            format!("Reused {reused} files and downloaded {downloaded} files."),
-        );
-        let exe_path = game_root.join(GAME_EXE);
-        let dll_path = game_root.join(GAME_DLL);
-        if !exe_path.is_file() || !dll_path.is_file() {
-            return Err("The OpenShores manifest is missing required game files.".to_string());
+fn check_game_update_sync() -> LauncherResult<UpdaterStatusPayload> {
+    let config = load_config()?;
+    let install_path = PathBuf::from(config.install_path.clone().unwrap());
+    if !install_path.join(GAME_EXE).is_file() {
+        return Ok(updater_status("current", "Install OpenShores before checking for game updates."));
+    }
+    let access = match fetch_chain(&config) {
+        Ok(access) => access,
+        Err(error) if error == LOGIN_NEEDED || error == LOGIN_EXPIRED => {
+            return Ok(updater_status("login", error));
         }
-
-        let selection = load_config()?.ip_patch_release;
-        let release = if selection.eq_ignore_ascii_case(DISABLED_PATCH_RELEASE) {
-            emit_progress(
-                app,
-                "IP patch disabled",
-                84.0,
-                "Installing clean game files without the IP patch.",
-            );
-            None
-        } else {
-            emit_progress(
-                app,
-                "Getting the IP patch",
-                71.0,
-                "Checking the selected patch release...",
-            );
-            let releases = fetch_patch_releases(&client)?;
-            let release = resolve_patch_release(&releases, &selection)?;
-            download_and_apply_patch(app, &client, &release, &game_root, &patch_path, 72.0, 84.0)?;
-            Some(release)
-        };
-
-        let installed_at = OffsetDateTime::now_utc()
-            .format(&Rfc3339)
-            .map_err(error_string)?;
-        let mut launcher_manifest = json!({
-            "managedBy": MANAGED_BY,
-            "launcherVersion": env!("OPENSHORES_LAUNCHER_VERSION"),
-            "installedAt": installed_at,
-            "gameManifestUrl": GAME_MANIFEST_URL,
-            "gameManifestVersion": game_manifest.version,
-            "gameManifestGenerated": game_manifest.generated,
-            "gameManifestFileCount": game_manifest.files.len()
-        });
-        if let Some(release) = release.as_ref() {
-            let object = launcher_manifest.as_object_mut().unwrap();
-            object.insert("patchTag".to_string(), json!(release.tag_name));
-            object.insert("patchPublishedAt".to_string(), json!(release.published_at));
-        }
-        write_json(&game_root.join(MANIFEST_FILE), &launcher_manifest)?;
-        emit_progress(
-            app,
-            "Finishing installation",
-            95.0,
-            "Activating the new installation...",
-        );
-        if install_path.exists() {
-            fs::rename(&install_path, &backup_path).map_err(error_string)?;
-            backup_active = true;
-        }
-        fs::rename(&game_root, &install_path).map_err(error_string)?;
-        if backup_active {
-            fs::remove_dir_all(&backup_path).map_err(error_string)?;
-            backup_active = false;
-        }
-        save_install_path(&install_path)?;
-        save_applied_patch_release(release.as_ref().map(|release| release.tag_name.as_str()))?;
-        emit_progress(
-            app,
-            "Ready to play",
-            100.0,
-            if release.is_some() {
-                "OpenShores and the IP patch are installed."
+        Err(error) => return Err(error),
+    };
+    let chain = &access.chain;
+    let chain::Installed::Version(installed) = chain.identify(&install_path)? else {
+        return Ok(updater_status(
+            "current",
+            "The game folder does not hold a known version of OpenShores.",
+        ));
+    };
+    let Some(patches) = chain.route(&installed) else {
+        return Ok(updater_status(
+            "current",
+            format!("No patches lead from version {installed} to version {}.", chain.latest),
+        ));
+    };
+    if patches.is_empty() {
+        return Ok(updater_status("current", format!("OpenShores {installed} is up to date.")));
+    }
+    let notes = patches
+        .iter()
+        .rev()
+        .filter_map(|patch| chain.version(&patch.to))
+        .map(|version| {
+            let title = if version.title.is_empty() { &version.id } else { &version.title };
+            if version.notes.trim().is_empty() {
+                format!("## {title}")
             } else {
-                "OpenShores is installed without the IP patch."
-            },
-        );
-        get_snapshot(state)
-    })();
-
-    if result.is_err() && backup_active && backup_path.exists() && !install_path.exists() {
-        let _ = fs::rename(&backup_path, &install_path);
-    }
-    let _ = fs::remove_dir_all(&work);
-    result
+                format!("## {title}\n\n{}", version.notes.trim())
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n---\n\n");
+    let mut status = updater_status(
+        "available",
+        format!("OpenShores {} is available (installed: {installed}).", chain.latest),
+    );
+    status.changelog_title = Some(format!("OpenShores {}", chain.latest));
+    status.changelog = Some(notes);
+    Ok(status)
 }
 
 fn uninstall_game_sync(app: &AppHandle, state: &AppState) -> LauncherResult<LauncherSnapshot> {
@@ -2162,7 +1312,7 @@ fn uninstall_game_sync(app: &AppHandle, state: &AppState) -> LauncherResult<Laun
 }
 
 fn main_game_launch_arguments(developer_mode: bool) -> Vec<&'static str> {
-    let mut arguments = vec!["-launcher"];
+    let mut arguments = Vec::new();
     if developer_mode {
         arguments.push("-log");
     }
@@ -2220,9 +1370,7 @@ fn launch_game_sync(
                     .accounts
                     .iter()
                     .find(|account| account.server_id == server.id);
-                if write_game_account_registry(&server.host, active_account)? {
-                    command.arg("-nologin");
-                }
+                write_game_account_registry(active_account)?;
             }
         }
         let mut child = command
@@ -2264,38 +1412,6 @@ fn launch_game_sync(
         },
     );
     get_snapshot(state)
-}
-
-fn release_version_label(release: &GithubRelease) -> LauncherResult<String> {
-    let value = if release.tag_name.trim().is_empty() {
-        release.name.as_deref().unwrap_or_default()
-    } else {
-        &release.tag_name
-    };
-    let version = value.trim().trim_start_matches(['v', 'V']);
-    if version.is_empty() {
-        return Err("The latest launcher release has no version tag.".to_string());
-    }
-    Ok(version.to_string())
-}
-
-fn release_changelog<'a>(releases: impl IntoIterator<Item = &'a GithubRelease>) -> String {
-    releases
-        .into_iter()
-        .filter_map(|release| {
-            let body = release.body.as_deref()?.trim();
-            if body.is_empty() {
-                return None;
-            }
-            let title = release
-                .name
-                .as_deref()
-                .filter(|name| !name.trim().is_empty())
-                .unwrap_or(&release.tag_name);
-            Some(format!("## {title}\n\n{body}"))
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n---\n\n")
 }
 
 fn download_launcher_update(
@@ -2344,123 +1460,161 @@ fn download_launcher_update(
     result
 }
 
+#[derive(Clone, Debug, Deserialize)]
+struct LauncherOffer {
+    version: String,
+    size: u64,
+    sha256: String,
+    url: String,
+    #[serde(default)]
+    notes: String,
+}
+
+impl LauncherOffer {
+    fn usable(&self) -> bool {
+        !self.version.is_empty()
+            && self.version.len() <= 32
+            && self.version.bytes().all(|byte| byte.is_ascii_alphanumeric() || b".-+".contains(&byte))
+            && self.sha256.len() == 64
+            && self.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+            && self.url.starts_with("/api/")
+            && !self.url.contains("..")
+            && !self.url.contains(['\\', '#'])
+    }
+
+    fn newer_than(&self, current: &str) -> bool {
+        match (semver::Version::parse(&self.version), semver::Version::parse(current)) {
+            (Ok(offered), Ok(running)) => offered > running,
+            _ => !self.version.eq_ignore_ascii_case(current),
+        }
+    }
+}
+
 fn check_updates_sync(
     app: &AppHandle,
     state: &AppState,
     manual: bool,
 ) -> LauncherResult<UpdaterStatusPayload> {
+    if cfg!(target_os = "linux") {
+        return check_appimage_update_sync(app, state, manual);
+    }
+    let config = load_config()?;
+    let server = connected_server(&config)?;
     let client = http_client()?;
     let response = client
-        .get(LAUNCHER_RELEASE_API)
+        .get(server_api_url(&server.host, "launcher")?)
         .timeout(METADATA_REQUEST_TIMEOUT)
         .send()
-        .map_err(error_string)?;
+        .map_err(|_| "Could not reach the website.".to_string())?;
     if response.status().as_u16() == 404 {
-        return Ok(updater_status("current", "The launcher update channel has not been published yet."));
+        *state.pending_update.lock().map_err(error_string)? = None;
+        return Ok(updater_status("current", "The website offers no launcher update."));
     }
-    let response = checked_response(response, "Launcher update check")?;
-    let mut releases: Vec<GithubRelease> = response.json().map_err(error_string)?;
-    releases.retain(|release| !release.draft);
-    releases.sort_by(|left, right| right.published_at.cmp(&left.published_at));
-    let release = releases
-        .first()
-        .ok_or_else(|| "The launcher update channel has not been published yet.".to_string())?;
-    let release_version = release_version_label(release)?;
+    let offer: LauncherOffer = checked_response(response, "Launcher update check")?
+        .json()
+        .map_err(|_| "The website's launcher information could not be read.".to_string())?;
+    if !offer.usable() {
+        return Err("The website's launcher information could not be read.".to_string());
+    }
     let current_version = env!("OPENSHORES_LAUNCHER_VERSION");
-    if release_version.eq_ignore_ascii_case(current_version) {
+    if !offer.newer_than(current_version) {
         *state.pending_update.lock().map_err(error_string)? = None;
         return Ok(updater_status("current", "Launcher is up to date."));
     }
-    let binary_name = if cfg!(target_os = "linux") { "OpenShores-Launcher-amd64.AppImage" } else { "OpenShores-Launcher.exe" };
-    let asset = release
-        .assets
-        .iter()
-        .find(|asset| asset.name.eq_ignore_ascii_case(binary_name))
-        .ok_or_else(|| {
-            format!("Launcher {release_version} does not include a portable Windows executable.")
-        })?;
+    let site = format!("https://{}", account_domain(&server.host));
     *state.pending_update.lock().map_err(error_string)? = Some(PendingUpdate {
-        asset: asset.clone(),
-        version: release_version.clone(),
+        asset: GithubAsset {
+            name: LAUNCHER_FILE.to_string(),
+            browser_download_url: format!("{site}{}", offer.url),
+            digest: Some(format!("sha256:{}", offer.sha256)),
+            size: offer.size,
+        },
+        version: offer.version.clone(),
     });
-    let included_releases = releases.iter().take_while(|candidate| {
-        release_version_label(candidate)
-            .is_ok_and(|version| !version.eq_ignore_ascii_case(current_version))
-    });
-    let mut status = updater_status("available", format!("Launcher {release_version} is available."));
-    status.changelog_title = Some(format!("Launcher {release_version}"));
-    status.changelog = Some(release_changelog(included_releases));
-    status.release_url = Some(release.html_url.clone());
+    let mut status = updater_status("available", format!("Launcher {} is available.", offer.version));
+    if !offer.notes.trim().is_empty() {
+        status.changelog_title = Some(format!("Launcher {}", offer.version));
+        status.changelog = Some(offer.notes.trim().to_string());
+        status.release_url = Some(format!("{site}/download"));
+    }
     if !manual {
         let _ = app.emit("updater-status", status.clone());
     }
     Ok(status)
 }
 
-fn check_ip_patch_update_sync() -> LauncherResult<UpdaterStatusPayload> {
-    let config = load_config()?;
-    let install_path = PathBuf::from(config.install_path.clone().unwrap());
-    if !is_managed_manifest(read_json::<Value>(&install_path.join(MANIFEST_FILE)).as_ref()) {
-        return Ok(updater_status("current", "Install OpenShores before checking the IP patch."));
-    }
+const LAUNCHER_RELEASES_API: &str = "https://api.github.com/repos/Norway174/OpenShores-Launcher/releases?per_page=30";
+const LAUNCHER_APPIMAGE: &str = "OpenShores-Launcher-amd64.AppImage";
 
-    if config
-        .ip_patch_release
-        .eq_ignore_ascii_case(DISABLED_PATCH_RELEASE)
-    {
-        return Ok(if config.applied_ip_patch_release.is_some() {
-            updater_status("available", "The installed IP patch can be removed.")
-        } else {
-            updater_status("current", "The IP patch is disabled.")
-        });
-    }
+#[derive(Clone, Debug, Deserialize)]
+struct LauncherRelease {
+    tag_name: String,
+    html_url: String,
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
+    draft: bool,
+    #[serde(default)]
+    prerelease: bool,
+    #[serde(default)]
+    assets: Vec<GithubAsset>,
+}
 
+fn check_appimage_update_sync(
+    app: &AppHandle,
+    state: &AppState,
+    manual: bool,
+) -> LauncherResult<UpdaterStatusPayload> {
+    if env::var_os("APPIMAGE").is_none() {
+        *state.pending_update.lock().map_err(error_string)? = None;
+        return Ok(updater_status("current", "This launcher is updated by the package manager that installed it."));
+    }
     let client = http_client()?;
-    let releases = fetch_patch_releases(&client)?;
-    let release = resolve_patch_release(&releases, &config.ip_patch_release)?;
-    if config.applied_ip_patch_release.as_deref() == Some(&release.tag_name) {
-        return Ok(updater_status("current", format!("IP patch {} is up to date.", release.tag_name)));
+    let response = client
+        .get(LAUNCHER_RELEASES_API)
+        .timeout(METADATA_REQUEST_TIMEOUT)
+        .send()
+        .map_err(|_| "Could not reach GitHub.".to_string())?;
+    if response.status().as_u16() == 404 {
+        *state.pending_update.lock().map_err(error_string)? = None;
+        return Ok(updater_status("current", "No launcher releases are published."));
     }
-
-    let prior_tag = config.applied_ip_patch_release.as_deref();
-    let target_index = releases
+    let releases: Vec<LauncherRelease> = checked_response(response, "Launcher update check")?
+        .json()
+        .map_err(|_| "The launcher's releases could not be read.".to_string())?;
+    let current_version = env!("OPENSHORES_LAUNCHER_VERSION");
+    let newest = releases
         .iter()
-        .position(|candidate| candidate.tag_name == release.tag_name)
-        .unwrap_or(0);
-    let included_releases = releases[target_index..]
-        .iter()
-        .take_while(|candidate| Some(candidate.tag_name.as_str()) != prior_tag);
-    let mut status = updater_status("available", format!("IP patch {} is available.", release.tag_name));
-    status.changelog_title = Some(format!("IP patch {}", release.tag_name));
-    status.changelog = Some(release_changelog(included_releases));
-    status.release_url = Some(release.html_url.clone());
-    Ok(status)
-}
-
-fn game_manifest_update_available(local: Option<&Value>, remote: &GameManifest) -> bool {
-    let Some(local) = local else {
-        return false;
+        .filter(|release| !release.draft && !release.prerelease)
+        .filter_map(|release| {
+            let version = semver::Version::parse(release.tag_name.trim().trim_start_matches(['v', 'V'])).ok()?;
+            let asset = release.assets.iter().find(|asset| asset.name.eq_ignore_ascii_case(LAUNCHER_APPIMAGE))?;
+            Some((version, release, asset))
+        })
+        .max_by(|left, right| left.0.cmp(&right.0));
+    let newer = match (&newest, semver::Version::parse(current_version)) {
+        (Some((offered, _, _)), Ok(running)) => *offered > running,
+        _ => false,
     };
-    local.get("gameManifestVersion").and_then(Value::as_str) != Some(remote.version.as_str())
-        || local.get("gameManifestGenerated").and_then(Value::as_u64) != Some(remote.generated)
-        || local.get("gameManifestFileCount").and_then(Value::as_u64)
-            != Some(remote.files.len() as u64)
-}
-
-fn check_game_update_sync() -> LauncherResult<UpdaterStatusPayload> {
-    let config = load_config()?;
-    let install_path = PathBuf::from(config.install_path.clone().unwrap());
-    let local = read_json::<Value>(&install_path.join(MANIFEST_FILE));
-    if !is_managed_manifest(local.as_ref()) || !install_path.join(GAME_EXE).is_file() {
-        return Ok(updater_status("current", "Install OpenShores before checking game files."));
+    let Some((version, release, asset)) = newest.filter(|_| newer) else {
+        *state.pending_update.lock().map_err(error_string)? = None;
+        return Ok(updater_status("current", "Launcher is up to date."));
+    };
+    let version = version.to_string();
+    *state.pending_update.lock().map_err(error_string)? = Some(PendingUpdate {
+        asset: asset.clone(),
+        version: version.clone(),
+    });
+    let mut status = updater_status("available", format!("Launcher {version} is available."));
+    if let Some(notes) = release.body.as_deref().map(str::trim).filter(|notes| !notes.is_empty()) {
+        status.changelog_title = Some(format!("Launcher {version}"));
+        status.changelog = Some(notes.to_string());
+        status.release_url = Some(release.html_url.clone());
     }
-
-    let remote = fetch_game_manifest(&http_client()?)?;
-    if game_manifest_update_available(local.as_ref(), &remote) {
-        Ok(updater_status("available", format!("OpenShores client {} is available.", remote.version)))
-    } else {
-        Ok(updater_status("current", "OpenShores game files are up to date."))
+    if !manual {
+        let _ = app.emit("updater-status", status.clone());
     }
+    Ok(status)
 }
 
 fn report_previous_update_error(app: &AppHandle) {
@@ -2498,7 +1652,7 @@ fn cleanup_legacy_electron_data() -> LauncherResult<bool> {
         }
     }
 
-    for file in [app_archive, legacy_app.join("resources").join(XDELTA_NAME)] {
+    for file in [app_archive, legacy_app.join("resources").join("xdelta3-3.0.11-x86_64.exe")] {
         if file.is_file() {
             fs::remove_file(file).map_err(error_string)?;
         }
@@ -2557,24 +1711,6 @@ fn batch_escape(value: &Path) -> String {
     value.to_string_lossy().replace('%', "%%").replace('"', "")
 }
 
-fn directory_file_bytes(path: &Path) -> LauncherResult<u64> {
-    let mut total = 0u64;
-    for entry in fs::read_dir(path).map_err(error_string)? {
-        let entry = entry.map_err(error_string)?;
-        let file_type = entry.file_type().map_err(error_string)?;
-        if file_type.is_symlink() {
-            return Err(
-                "The installation contains a symbolic link and cannot be moved safely.".to_string(),
-            );
-        }
-        if file_type.is_dir() {
-            total = total.saturating_add(directory_file_bytes(&entry.path())?);
-        } else if file_type.is_file() {
-            total = total.saturating_add(entry.metadata().map_err(error_string)?.len());
-        }
-    }
-    Ok(total)
-}
 
 fn copy_installation_tree(
     app: &AppHandle,
@@ -2977,25 +2113,6 @@ async fn install_game(
 }
 
 #[tauri::command]
-async fn get_ip_patch_releases() -> LauncherResult<Vec<PatchReleaseOption>> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let client = http_client()?;
-        fetch_patch_releases(&client).map(|releases| patch_release_options(&releases))
-    })
-    .await
-    .map_err(error_string)?
-}
-
-#[tauri::command]
-async fn set_ip_patch_release(
-    state: State<'_, AppState>,
-    selection: String,
-) -> LauncherResult<LauncherSnapshot> {
-    save_patch_selection(selection)?;
-    get_snapshot(state.inner())
-}
-
-#[tauri::command]
 fn set_developer_mode(state: State<'_, AppState>, enabled: bool) -> LauncherResult<LauncherSnapshot> {
     save_developer_mode(enabled)?;
     get_snapshot(state.inner())
@@ -3298,17 +2415,6 @@ fn save_theme(
 }
 
 #[tauri::command]
-async fn update_ip_patch(
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> LauncherResult<LauncherSnapshot> {
-    let backend = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || update_ip_patch_sync(&app, &backend, false))
-        .await
-        .map_err(error_string)?
-}
-
-#[tauri::command]
 async fn uninstall_game(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -3543,7 +2649,7 @@ async fn refresh_server_statuses(state: State<'_, AppState>) -> LauncherResult<L
 
 #[tauri::command]
 async fn check_path(cmd: String, _state: State<'_, AppState>) -> LauncherResult<PathPayload> {
-    if cmd != WINE_NAME && cmd != XDELTA_NAME {
+    if cmd != WINE_NAME && cmd != HPATCHZ_NAME {
         return Err("Checking for this command is not allowed.".to_string())
     }
     tauri::async_runtime::spawn_blocking(move || {
@@ -3564,9 +2670,16 @@ fn authenticate_account(
 ) -> LauncherResult<LauncherSnapshot> {
     let mut config = load_config()?;
     let server = connected_server(&config)?;
+    if endpoint == "register" {
+        return Err(format!(
+            "Create your account on {} first, then log in here.",
+            account_domain(&server.host)
+        ));
+    }
     let client = account_client()?;
     let response = client
-        .post(server_api_url(&server.host, endpoint)?)
+        .post(server_api_url(&server.host, "launcher/login")?)
+        .header(LAUNCHER_HEADER, "1")
         .json(&json!({ "username": username.trim(), "password": password }))
         .send()
         .map_err(|_| "Could not reach the account server.".to_string())?;
@@ -3580,6 +2693,11 @@ fn authenticate_account(
             },
         ));
     }
+    let session = response
+        .cookies()
+        .find(|cookie| cookie.name() == SESSION_COOKIE)
+        .map(|cookie| cookie.value().to_string())
+        .filter(|value| is_session_value(value));
     let canonical_username = response
         .json::<Value>()
         .ok()
@@ -3594,6 +2712,7 @@ fn authenticate_account(
         server_id: server.id.clone(),
         username: canonical_username,
         password_sha1: password_sha1_hex(&password),
+        session,
     };
     config
         .accounts
@@ -3756,14 +2875,70 @@ fn open_folder() -> LauncherResult<()> {
     open::that(path).map_err(error_string)
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct NewsItem {
+    title: String,
+    #[serde(default)]
+    date: String,
+    #[serde(default)]
+    summary: String,
+    url: String,
+}
+
+fn fetch_news() -> Vec<NewsItem> {
+    let Ok(config) = load_config() else { return Vec::new() };
+    let Ok(server) = connected_server(&config) else { return Vec::new() };
+    let Ok(url) = server_api_url(&server.host, "news") else { return Vec::new() };
+    let Ok(client) = http_client() else { return Vec::new() };
+    let site = format!("https://{}", account_domain(&server.host));
+    client
+        .get(url)
+        .timeout(METADATA_REQUEST_TIMEOUT)
+        .send()
+        .ok()
+        .filter(|response| response.status().is_success())
+        .and_then(|response| response.json::<Vec<NewsItem>>().ok())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|item| news_path_ok(&item.url) && !item.title.trim().is_empty())
+        .take(NEWS_ITEMS)
+        .map(|item| NewsItem {
+            title: item.title.chars().take(160).collect(),
+            date: item.date.chars().take(10).collect(),
+            summary: item.summary.chars().take(300).collect(),
+            url: format!("{site}{}", item.url),
+        })
+        .collect()
+}
+
+fn news_path_ok(path: &str) -> bool {
+    path.strip_prefix("/news/").is_some_and(|slug| {
+        !slug.is_empty()
+            && slug.len() <= 100
+            && slug.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"-_".contains(&byte))
+    })
+}
+
+#[tauri::command]
+async fn get_news() -> LauncherResult<Vec<NewsItem>> {
+    tauri::async_runtime::spawn_blocking(fetch_news)
+        .await
+        .map_err(error_string)
+}
+
 #[tauri::command]
 fn open_link(url: String) -> LauncherResult<()> {
+    let site = load_config()
+        .ok()
+        .and_then(|config| connected_server(&config).ok())
+        .map(|server| format!("https://{}/", account_domain(&server.host)))
+        .unwrap_or_default();
     let allowed = [
         "https://openshores.net/",
-        "https://github.com/Celarious/OpenShores-IP-Patch",
         "https://github.com/Norway174/OpenShores-Launcher",
+        site.as_str(),
     ];
-    if !allowed.iter().any(|prefix| url.starts_with(prefix)) {
+    if !allowed.iter().any(|prefix| !prefix.is_empty() && url.starts_with(prefix)) {
         return Err("Blocked external URL.".to_string());
     }
     open::that(url).map_err(error_string)
@@ -3790,8 +2965,14 @@ async fn open_changelog(
     if title.trim().is_empty() || changelog.trim().is_empty() {
         return Err("No changelog is available for this update.".to_string());
     }
-    if !release_url.starts_with("https://github.com/") {
-        return Err("The release URL is not a GitHub URL.".to_string());
+    let site = load_config()
+        .ok()
+        .and_then(|config| connected_server(&config).ok())
+        .map(|server| format!("https://{}/", account_domain(&server.host)))
+        .unwrap_or_default();
+    let known = ["https://github.com/", "https://openshores.net/", site.as_str()];
+    if !known.iter().any(|prefix| !prefix.is_empty() && release_url.starts_with(prefix)) {
+        return Err("The release URL is not a known address.".to_string());
     }
     *state.changelog.lock().map_err(error_string)? = Some(ChangelogPayload {
         title,
@@ -3834,13 +3015,6 @@ async fn check_updates(
 ) -> LauncherResult<UpdaterStatusPayload> {
     let backend = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || check_updates_sync(&app, &backend, true))
-        .await
-        .map_err(error_string)?
-}
-
-#[tauri::command]
-async fn check_ip_patch_update() -> LauncherResult<UpdaterStatusPayload> {
-    tauri::async_runtime::spawn_blocking(check_ip_patch_update_sync)
         .await
         .map_err(error_string)?
 }
@@ -3991,8 +3165,6 @@ fn main() {
             clear_client_log,
             choose_folder,
             install_game,
-            get_ip_patch_releases,
-            set_ip_patch_release,
             set_developer_mode,
             set_post_launch_action,
             set_theme,
@@ -4007,7 +3179,6 @@ fn main() {
             finish_theme_element_picker,
             get_theme_for_edit,
             save_theme,
-            update_ip_patch,
             uninstall_game,
             add_server,
             edit_server,
@@ -4026,10 +3197,10 @@ fn main() {
             open_folder,
             open_link,
             get_changelog,
+            get_news,
             open_changelog,
             close_changelog,
             check_updates,
-            check_ip_patch_update,
             check_game_update,
             install_launcher_update,
             check_path
@@ -4066,27 +3237,6 @@ fn main() {
 mod tests {
     use super::*;
 
-    fn test_game_manifest() -> GameManifest {
-        GameManifest {
-            version: "test".to_string(),
-            generated: 1,
-            base_url: "/downloads/client/".to_string(),
-            total_size: 30,
-            files: vec![
-                GameManifestFile {
-                    path: GAME_EXE.to_string(),
-                    size: 20,
-                    sha256: "a".repeat(64),
-                },
-                GameManifestFile {
-                    path: GAME_DLL.to_string(),
-                    size: 10,
-                    sha256: "b".repeat(64),
-                },
-            ],
-        }
-    }
-
     #[test]
     fn theme_names_create_safe_css_file_names() {
         assert_eq!(theme_file_name_from_name("Ocean Blue").unwrap(), "Ocean Blue.css");
@@ -4113,79 +3263,6 @@ mod tests {
     }
 
     #[test]
-    fn game_update_check_compares_manifest_identity() {
-        let remote = test_game_manifest();
-        let current = json!({
-            "gameManifestVersion": remote.version.clone(),
-            "gameManifestGenerated": remote.generated,
-            "gameManifestFileCount": remote.files.len()
-        });
-        assert!(!game_manifest_update_available(Some(&current), &remote));
-
-        let older = json!({
-            "gameManifestVersion": "older",
-            "gameManifestGenerated": remote.generated,
-            "gameManifestFileCount": remote.files.len()
-        });
-        assert!(game_manifest_update_available(Some(&older), &remote));
-    }
-
-    #[test]
-    fn release_versions_accept_arbitrary_labels() {
-        let release = GithubRelease {
-            tag_name: "v1.2.3.4".to_string(),
-            name: None,
-            body: None,
-            html_url: "https://github.com/example/releases/v1.2.3.4".to_string(),
-            published_at: None,
-            draft: false,
-            prerelease: false,
-            assets: Vec::new(),
-        };
-        assert_eq!(release_version_label(&release).unwrap(), "1.2.3.4");
-
-        let named_release = GithubRelease {
-            tag_name: String::new(),
-            name: Some("nightly-2026-08-25".to_string()),
-            ..release
-        };
-        assert_eq!(
-            release_version_label(&named_release).unwrap(),
-            "nightly-2026-08-25"
-        );
-    }
-
-    #[test]
-    fn release_changelog_combines_release_bodies() {
-        let releases = [
-            GithubRelease {
-                tag_name: "v1.2.0".to_string(),
-                name: Some("Version 1.2.0".to_string()),
-                body: Some("* New update banners".to_string()),
-                html_url: "https://github.com/example/releases/v1.2.0".to_string(),
-                published_at: None,
-                draft: false,
-                prerelease: false,
-                assets: Vec::new(),
-            },
-            GithubRelease {
-                tag_name: "v1.1.0".to_string(),
-                name: None,
-                body: Some("* Previous fixes".to_string()),
-                html_url: "https://github.com/example/releases/v1.1.0".to_string(),
-                published_at: None,
-                draft: false,
-                prerelease: false,
-                assets: Vec::new(),
-            },
-        ];
-        let changelog = release_changelog(&releases);
-        assert!(changelog.contains("## Version 1.2.0\n\n* New update banners"));
-        assert!(changelog.contains("## v1.1.0\n\n* Previous fixes"));
-        assert!(changelog.contains("\n\n---\n\n"));
-    }
-
-    #[test]
     fn update_batch_paths_escape_percent_expansion() {
         assert_eq!(
             batch_escape(Path::new(r"C:\Temp\100%\Launcher.exe")),
@@ -4207,11 +3284,6 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn xdelta_payload_is_embedded() {
-        assert!(XDELTA_BYTES.len() > 500_000);
-    }
-
-    #[test]
     fn offline_designer_modes_map_to_expected_arguments() {
         assert_eq!(designer_launch_argument("spacecraft").unwrap(), "-spacecraft");
         assert_eq!(designer_launch_argument("building").unwrap(), "-building");
@@ -4221,11 +3293,8 @@ mod tests {
 
     #[test]
     fn developer_game_launch_adds_log_argument() {
-        assert_eq!(main_game_launch_arguments(false), vec!["-launcher"]);
-        assert_eq!(
-            main_game_launch_arguments(true),
-            vec!["-launcher", "-log"]
-        );
+        assert!(main_game_launch_arguments(false).is_empty());
+        assert_eq!(main_game_launch_arguments(true), vec!["-log"]);
     }
 
     #[test]
@@ -4248,78 +3317,6 @@ mod tests {
         assert!(ignored_log_directory(Path::new("ExampleStory")));
         assert!(ignored_log_directory(Path::new("examplestory")));
         assert!(!ignored_log_directory(Path::new("Story")));
-    }
-
-    #[test]
-    fn xdelta_source_labels_are_normalized_without_patch_name_rules() {
-        assert_eq!(
-            normalized_xdelta_source_name("Shores of Hazeron.exe#a742ce94d906994a38c4ecd252076b2a")
-                .as_deref(),
-            Some("Shores of Hazeron.exe")
-        );
-        assert_eq!(
-            normalized_xdelta_source_name("AuLoginClient13 old.dll#714b63cc").as_deref(),
-            Some("AuLoginClient13.dll")
-        );
-        assert_eq!(
-            normalized_xdelta_source_name("AuUtil13.dll#e7b5eb27").as_deref(),
-            Some("AuUtil13.dll")
-        );
-    }
-
-    #[test]
-    fn patch_release_selection_uses_strings_for_latest_and_pinned_versions() {
-        let releases = vec![
-            GithubRelease {
-                tag_name: "r4".to_string(),
-                name: Some("Fourth release".to_string()),
-                body: None,
-                html_url: "https://github.com/example/releases/r4".to_string(),
-                published_at: Some("2026-08-07T02:32:45Z".to_string()),
-                draft: false,
-                prerelease: false,
-                assets: Vec::new(),
-            },
-            GithubRelease {
-                tag_name: "r3".to_string(),
-                name: Some("Third release".to_string()),
-                body: None,
-                html_url: "https://github.com/example/releases/r3".to_string(),
-                published_at: Some("2026-08-07T01:17:58Z".to_string()),
-                draft: false,
-                prerelease: false,
-                assets: Vec::new(),
-            },
-        ];
-        assert_eq!(
-            resolve_patch_release(&releases, LATEST_PATCH_RELEASE)
-                .unwrap()
-                .tag_name,
-            "r4"
-        );
-        assert_eq!(
-            resolve_patch_release(&releases, "r3").unwrap().tag_name,
-            "r3"
-        );
-    }
-
-    #[test]
-    fn existing_configs_default_to_latest_patch_release() {
-        let config: LauncherConfig =
-            serde_json::from_str(r#"{"installPath":"C:\\OpenShores"}"#).unwrap();
-        assert_eq!(config.ip_patch_release, LATEST_PATCH_RELEASE);
-        assert_eq!(config.applied_ip_patch_release, None);
-        assert_eq!(config.servers, None);
-        assert_eq!(config.log_font_size, None);
-        assert_eq!(config.game_launch_action, POST_LAUNCH_DO_NOTHING);
-        assert_eq!(config.designer_launch_action, POST_LAUNCH_DO_NOTHING);
-
-        let saved = LauncherConfig {
-            applied_ip_patch_release: Some("r4".to_string()),
-            ..config
-        };
-        let json = serde_json::to_value(saved).unwrap();
-        assert_eq!(json["appliedIpPatchRelease"], "r4");
     }
 
     #[test]
@@ -4398,10 +3395,97 @@ mod tests {
             server_id: "openshores".to_string(),
             username: "Explorer".to_string(),
             password_sha1: password_sha1_hex("secret"),
+            session: None,
         };
         let json = serde_json::to_string(&account).unwrap();
         assert!(json.contains("e5e9fa1ba31ecd1ae84f75caaa474f3a663f05f4"));
         assert!(!json.contains("secret"));
+    }
+
+    #[test]
+    fn the_website_session_is_kept_only_when_it_is_a_plain_key() {
+        assert!(is_session_value("0123456789abcdefghijklmnopqrstuv"));
+        for bad in ["", "short", "abc; other=1 0123456789abcdef", "0123456789abcdef
+X: y"] {
+            assert!(!is_session_value(bad), "{bad}");
+        }
+        let account = SavedAccount {
+            server_id: "openshores".to_string(),
+            username: "Explorer".to_string(),
+            password_sha1: password_sha1_hex("secret"),
+            session: Some("0123456789abcdefghijklmnopqrstuv".to_string()),
+        };
+        assert!(site_client(&account).is_ok());
+        let logged_out: SavedAccount = serde_json::from_str(
+            r#"{"serverId":"openshores","username":"Explorer","passwordSha1":"e5e9fa1ba31ecd1ae84f75caaa474f3a663f05f4"}"#,
+        )
+        .unwrap();
+        assert_eq!(logged_out.session, None);
+        assert_eq!(site_client(&logged_out).unwrap_err(), LOGIN_NEEDED);
+    }
+
+    #[test]
+    fn a_launcher_offer_is_checked_and_compared() {
+        let offer = |version: &str, url: &str, sha: &str| LauncherOffer {
+            version: version.to_string(),
+            size: 1,
+            sha256: sha.to_string(),
+            url: url.to_string(),
+            notes: String::new(),
+        };
+        let sha = "ab".repeat(32);
+        assert!(offer("2.0.1", "/api/launcher/download", &sha).usable());
+        for (version, url, digest) in [
+            ("", "/api/launcher/download", sha.as_str()),
+            ("2.0.1 beta", "/api/launcher/download", sha.as_str()),
+            ("2.0.1", "https://elsewhere.example/launcher.exe", sha.as_str()),
+            ("2.0.1", "/api/../secret", sha.as_str()),
+            ("2.0.1", "/api/launcher/download", "short"),
+        ] {
+            assert!(!offer(version, url, digest).usable(), "{version} {url}");
+        }
+        assert!(offer("2.0.1", "/api/x", &sha).newer_than("2.0.0"));
+        assert!(offer("2.1.0", "/api/x", &sha).newer_than("2.0.9"));
+        assert!(!offer("2.0.0", "/api/x", &sha).newer_than("2.0.0"));
+        assert!(!offer("1.9.9", "/api/x", &sha).newer_than("2.0.0"));
+        assert!(offer("spring", "/api/x", &sha).newer_than("2.0.0"));
+        assert!(!offer("spring", "/api/x", &sha).newer_than("Spring"));
+    }
+
+    #[test]
+    fn news_links_stay_on_the_news_pages() {
+        assert!(news_path_ok("/news/first-flight"));
+        for bad in ["/news/", "/news/a/b", "/account", "https://elsewhere.example/news/x", "/news/../admin", "/news/a?b"] {
+            assert!(!news_path_ok(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_part_already_downloaded_is_not_counted_again() {
+        let folder = env::temp_dir().join(format!("openshores-launcher-test-parts-{}", std::process::id()));
+        fs::create_dir_all(&folder).unwrap();
+        assert_eq!(bytes_to_download(&folder, "p1.zip", 100), 100);
+        fs::write(folder.join("p1.zip.part"), [0_u8; 40]).unwrap();
+        assert_eq!(bytes_to_download(&folder, "p1.zip", 100), 60);
+        fs::write(folder.join("p1.zip"), [0_u8; 100]).unwrap();
+        assert_eq!(bytes_to_download(&folder, "p1.zip", 100), 0);
+        assert!(require_free_space(&folder, 1, "for the test").is_ok());
+        let error = require_free_space(&folder, u64::MAX, "for the test").unwrap_err();
+        assert!(error.contains("Not enough free disk space for the test"), "{error}");
+        fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn sizes_are_shown_in_the_unit_that_fits() {
+        assert_eq!(format_bytes(512 * 1024), "512.0 KB");
+        assert_eq!(format_bytes(245 * 1024 * 1024), "245.0 MB");
+        assert_eq!(format_bytes(3 * 1024 * 1024 * 1024 / 2), "1.50 GB");
+    }
+
+    #[test]
+    fn the_patcher_is_embedded() {
+        #[cfg(windows)]
+        assert!(install::HPATCHZ_BYTES.is_some_and(|bytes| bytes.len() > 100_000));
     }
 
     #[test]
@@ -4412,11 +3496,13 @@ mod tests {
                 server_id: "openshores".to_string(),
                 username: "Explorer".to_string(),
                 password_sha1: password_sha1_hex("first"),
+                session: None,
             },
             SavedAccount {
                 server_id: "community".to_string(),
                 username: "Builder".to_string(),
                 password_sha1: password_sha1_hex("second"),
+                session: None,
             },
         ];
         let username_for = |server_id: &str| {
@@ -4447,32 +3533,4 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-    #[test]
-    fn game_manifest_paths_are_safe_and_urls_encode_filenames() {
-        let manifest = test_game_manifest();
-        validate_game_manifest(&manifest).unwrap();
-        assert!(manifest_relative_path("../outside.dll").is_err());
-        assert!(manifest_relative_path(r"folder\outside.dll").is_err());
-        assert_eq!(
-            manifest_file_url(&manifest, &manifest.files[0])
-                .unwrap()
-                .as_str(),
-            "https://openshores.net/downloads/client/Shores%20of%20Hazeron.exe"
-        );
-    }
-
-    #[test]
-    fn game_manifest_rejects_duplicate_paths_and_wrong_totals() {
-        let mut duplicate = test_game_manifest();
-        duplicate.files[1].path = GAME_EXE.to_ascii_lowercase();
-        assert!(validate_game_manifest(&duplicate)
-            .unwrap_err()
-            .contains("duplicate"));
-
-        let mut wrong_total = test_game_manifest();
-        wrong_total.total_size += 1;
-        assert!(validate_game_manifest(&wrong_total)
-            .unwrap_err()
-            .contains("total size"));
-    }
 }

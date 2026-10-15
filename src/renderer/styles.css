@@ -71,6 +71,15 @@ main { position: relative; height: 100%; overflow: hidden; }
 .large-dot.ready { background: var(--green); box-shadow: 0 0 9px rgba(99, 198, 139, .5); }
 .large-dot.running { background: #57b8e8; box-shadow: 0 0 9px rgba(87, 184, 232, .5); }
 .status-copy { margin: 8px 0 0 19px; color: #929292; font-size: 11px; }
+.news { margin: 18px 0 0 19px; min-height: 0; overflow: hidden; }
+.news-heading { color: var(--muted); font-size: 9px; letter-spacing: 1.4px; }
+.news-list { margin-top: 6px; display: grid; gap: 7px; }
+.news-item { display: grid; grid-template-columns: 62px minmax(0, 1fr); gap: 10px; align-items: baseline; }
+.news-item time { color: #737373; font-size: 10px; white-space: nowrap; }
+.news-item button { padding: 0; border: 0; color: #75bddd; background: transparent; font-size: 12px; text-align: left; cursor: pointer; }
+.news-item button:hover { text-decoration: underline; }
+.news-item p { grid-column: 2; margin: 1px 0 0; color: #929292; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.update-banner.login .update-banner-icon { font-weight: 700; }
 .startup-placeholder { min-height: 35px; display: flex; align-items: center; gap: 11px; margin-top: 21px; color: #d8d8d8; }
 .startup-placeholder strong { display: block; font-size: 11px; font-weight: 600; }
 .startup-placeholder p { margin: 3px 0 0; color: #8f8f8f; font-size: 9px; }

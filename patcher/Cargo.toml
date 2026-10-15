@@ -1,0 +1,28 @@
+[package]
+name = "openshores-patcher"
+version = "0.0.0"
+description = "A modern launcher for OpenShores"
+authors = ["Norway174"]
+license = "MIT"
+edition = "2026"
+build = "build.rs"
+
+
+[build-dependencies]
+serde_json = "1"
+
+[dependencies]
+fs2 = "0.4"
+reqwest = { version = "0.13.4", features = ["blocking", "json", "cookies"] }
+rpassword = "7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sevenz-rust2 = "0.24.0"
+sha2 = "0.10"
+time = { version = "0.3", features = ["formatting"] }
+zip = { version = "8.1.0", default-features = false, features = ["deflate"] }
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = true
